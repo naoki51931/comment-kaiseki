@@ -47,7 +47,9 @@ services:
     build: ./backend
     environment:
       DATABASE_URL: postgresql+psycopg://kifu:local-development-only@db:5432/kifu_comment
-      JWT_SECRET: ${JWT_SECRET}
+      JWT_SECRET: 
+      LOGIN_SESSION_HOURS: "5"
+      MINIMUM_PAYOUT_YEN: "10000"
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
       BANK_FINGERPRINT_KEY: ${BANK_FINGERPRINT_KEY}
       UPLOAD_DIR: /data/uploads

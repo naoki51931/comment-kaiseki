@@ -63,8 +63,10 @@ def test_analysis_persists_results_and_critical_positions() -> None:
             hash_character="b",
         )
         engine = SequenceEngine([
+            EngineEvaluation(20, None, ["7g7f"]),  # 1手目の着手前候補
             EngineEvaluation(120, None, ["3c3d"]),
             EngineEvaluation(-900, None, ["2g2f", "8c8d"]),
+            EngineEvaluation(330, None, ["2g2f"]),  # 3手目の着手前候補
             EngineEvaluation(300, None, ["8c8d"]),
         ])
 
@@ -79,6 +81,7 @@ def test_analysis_persists_results_and_critical_positions() -> None:
         assert game.critical_position_count == 3
         assert len(results) == 3
         assert results[0].sfen_before == shogi.STARTING_SFEN
+        assert results[0].pre_move_variations[0]["principal_variation"] == ["7g7f"]
         assert results[1].evaluation_user == -900
         assert results[1].principal_variation == ["2g2f", "8c8d"]
         assert results[1].engine_name == "test-usi"

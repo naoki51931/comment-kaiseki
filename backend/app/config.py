@@ -18,8 +18,7 @@ class Settings:
     engine_nodes = int(os.getenv("ENGINE_NODES", "10000"))
     engine_timeout_seconds = float(os.getenv("ENGINE_TIMEOUT_SECONDS", "30"))
     jwt_secret = os.getenv("JWT_SECRET", "development-only-change-me")
-    access_token_minutes = int(os.getenv("ACCESS_TOKEN_MINUTES", "15"))
-    refresh_token_days = int(os.getenv("REFRESH_TOKEN_DAYS", "30"))
+    login_session_hours = int(os.getenv("LOGIN_SESSION_HOURS", "5"))
     # 確認トークンはメールの所有者だけが受け取る。テストで明示的に
     # 有効化した場合を除き、APIレスポンスへは含めない。
     expose_verification_token = env_bool("EXPOSE_VERIFICATION_TOKEN", False)
@@ -44,7 +43,7 @@ class Settings:
     reward_per_game_yen = int(os.getenv("REWARD_PER_GAME_YEN", "300"))
     reward_daily_limit = int(os.getenv("REWARD_DAILY_LIMIT", "2"))
     reward_monthly_limit = int(os.getenv("REWARD_MONTHLY_LIMIT", "20"))
-    minimum_payout_yen = int(os.getenv("MINIMUM_PAYOUT_YEN", "3000"))
+    minimum_payout_yen = int(os.getenv("MINIMUM_PAYOUT_YEN", "10000"))
     stripe_secret_key = os.getenv("STRIPE_SECRET_KEY", "")
     stripe_webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET", "")
     ai_access_monthly_price_yen = int(os.getenv("AI_ACCESS_MONTHLY_PRICE_YEN", "1000"))

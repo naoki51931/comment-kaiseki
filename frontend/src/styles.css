@@ -81,6 +81,30 @@ button:disabled { opacity: .55; cursor: wait; }
 .shogi-board { width: 80%; margin: 0 auto; display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); grid-template-rows: repeat(9, minmax(0, 1fr)); aspect-ratio: 1 / 1; border: 2px solid #4f3b24; background: #ddb66f; }
 .board-square { width: 100%; height: 100%; min-width: 0; min-height: 0; display: grid; place-items: center; overflow: hidden; border: 1px solid rgba(79,59,36,.65); font: 700 clamp(16px, 3vw, 28px) "Noto Serif JP", serif; }
 .board-square span { display: inline-block; line-height: 1; }
+.branch-start-button { width: 100%; margin-top: 18px; background: #70552d; }
+.branch-editor { margin-top: 18px; padding: 14px; border: 2px solid #92713e; border-radius: 10px; background: #fffaf0; }
+.branch-heading { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 8px; }
+.branch-heading strong,.branch-heading small { display: block; }
+.branch-heading small { margin-top: 3px; color: #6c6256; }
+.branch-heading div:last-child { display: flex; gap: 6px; }
+.branch-heading button { padding: 7px 9px; }
+.branch-board { width: 100%; }
+.branch-board .board-square { appearance: none; padding: 0; border-radius: 0; color: #241f19; background: transparent; cursor: pointer; }
+.branch-board .board-square.selected { background: rgba(43,95,73,.38); box-shadow: inset 0 0 0 3px #245d48; }
+.branch-board .board-square.legal-target { background: radial-gradient(circle,rgba(151,49,37,.65) 0 18%,transparent 20%); }
+.branch-board .board-square.legal-target:hover { background: rgba(151,49,37,.32); }
+.branch-hand { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; margin: 10px 0; }
+.branch-hand span { color: #6c6256; }
+.branch-hand button { min-width: 38px; padding: 7px; background: #ead4a5; color: #241f19; }
+.branch-hand button.selected { outline: 3px solid #245d48; }
+.branch-sequence { margin-top: 12px; }
+.branch-sequence ol { display: flex; flex-wrap: wrap; gap: 5px 22px; padding-left: 24px; }
+.branch-actions,.saved-branches { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; }
+.branch-actions button { flex: 1; min-width: 150px; }
+.saved-branches button { padding: 6px 10px; background: #e7dcc5; color: #332819; }
+.branch-analysis { margin-top: 14px; padding: 12px; border-radius: 8px; background: #f1f5ed; }
+.branch-analysis article { padding: 8px 0; border-top: 1px solid #d4ddcf; }
+.branch-analysis article p { margin: 4px 0 0; }
 .gote-piece { transform: rotate(180deg); }
 .piece-stand { min-height: 38px; display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 7px 0; font-size: 13px; }
 .piece-stand span { color: #6c6256; }
@@ -162,3 +186,60 @@ button:disabled { opacity: .55; cursor: wait; }
 .search-result span, .search-result small { color: #6c6256; }
 .search-result p { margin: 4px 0; white-space: pre-wrap; }
 @media (max-width: 560px) { .search-input-row { grid-template-columns: 1fr; } .search-input-row button { width: 100%; } }
+.evaluation-chart { margin: 16px 0 4px; padding: 12px 12px 8px; border: 1px solid #d7cdbc; background: #faf8f2; }
+.evaluation-chart-heading { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+.evaluation-chart-heading span { color: #6c6256; font-size: 11px; }
+.evaluation-chart svg { display: block; width: 100%; height: auto; cursor: crosshair; touch-action: manipulation; }
+.evaluation-chart text { fill: #776b5d; font: 11px "Noto Sans JP", sans-serif; }
+.chart-grid { stroke: #ddd4c6; stroke-width: 1; }
+.chart-zero { stroke: #9b8f80; stroke-width: 1.5; stroke-dasharray: 5 4; }
+.chart-line { fill: none; stroke: #9a3d2f; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+.chart-cursor { stroke: #263e35; stroke-width: 1.5; }
+.chart-point { fill: #fffdf8; stroke: #263e35; stroke-width: 3; }
+.evaluation-chart-current { display: flex; justify-content: flex-end; gap: 9px; align-items: baseline; margin-top: -4px; font-size: 12px; }
+.evaluation-chart-current strong { color: #9a3d2f; font-size: 16px; }
+.evaluation-chart-locked { margin: 16px 0 4px; padding: 18px; border: 1px dashed #cec3b2; background: #faf8f2; color: #81766a; text-align: center; font-size: 13px; }
+@media (max-width: 480px) { .evaluation-chart-heading { align-items: flex-start; flex-direction: column; } }
+
+.comment-feedback { margin: 14px 0 0; }
+.playback-heading-actions { display: grid; justify-items: end; gap: 9px; }
+.playback-heading-actions small { max-width: 220px; color: #81766a; text-align: right; }
+.skill-page { max-width: 980px; display: grid; gap: 24px; }
+.skill-hero { text-align: center; position: relative; }
+.reference-badge { position: absolute; top: 24px; right: 24px; padding: 6px 10px; background: #f4dfaa; color: #6c4e10; font-weight: 700; }
+.skill-rank { display: block; margin: 18px 0 4px; font: 700 clamp(52px, 9vw, 86px) "Noto Serif JP", serif; color: #263e35; }
+.skill-rating { font: 700 25px "Noto Serif JP", serif; }
+.skill-confidence { display: flex; justify-content: center; gap: 28px; margin: 20px 0; color: #5c5349; }
+.window-tabs { display: flex; justify-content: center; gap: 8px; margin: 18px 0; }
+.window-tabs button { background: #e8dfcf; color: #3f3429; min-width: 90px; }
+.window-tabs button.active { background: #263e35; color: white; }
+.detail-button { background: transparent; border: 1px solid #806f5d; color: #3f3429; }
+.skill-details { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; margin-top: 22px; background: #d7cdbc; border: 1px solid #d7cdbc; text-align: left; }
+.skill-details span, .endgame-metrics span { display: grid; gap: 7px; padding: 15px; background: #faf8f2; color: #6c6256; font-size: 12px; }
+.skill-details strong, .endgame-metrics strong { color: #241f19; font-size: 18px; }
+.skill-section h2 { font: 700 27px "Noto Serif JP", serif; }
+.skill-chart { overflow-x: auto; }
+.skill-chart svg { display: block; width: 100%; min-width: 540px; }
+.skill-chart text { fill: #776b5d; font: 11px "Noto Sans JP", sans-serif; }
+.skill-point circle { fill: #fffdf8; stroke: #263e35; stroke-width: 3; }
+.skill-point:hover circle { fill: #e1b55d; r: 8px; }
+.history-summary { display: flex; gap: 24px; justify-content: center; flex-wrap: wrap; padding-top: 15px; }
+.endgame-score strong { font: 700 58px "Noto Serif JP", serif; color: #9a3d2f; }
+.endgame-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: #d7cdbc; border: 1px solid #d7cdbc; }
+.recommendations { display: grid; gap: 12px; }
+.recommendations article { display: grid; grid-template-columns: 44px 1fr; gap: 15px; padding: 18px; background: #faf8f2; border-left: 4px solid #9a3d2f; }
+.recommendations article > span { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 50%; background: #263e35; color: white; font-weight: 700; }
+.recommendations h3 { margin: 0 0 5px; }
+.recommendations p { margin-bottom: 0; color: #6c6256; line-height: 1.7; }
+@media (max-width: 700px) {
+  .skill-details { grid-template-columns: repeat(2, 1fr); }
+  .endgame-metrics { grid-template-columns: 1fr; }
+  .skill-confidence { flex-direction: column; gap: 6px; }
+  .playback-heading-actions { justify-items: start; }
+  .playback-heading-actions small { text-align: left; }
+}
+.reanalyze-button { background: #fff8e8; border: 1px solid #886b3d; color: #684d24; }
+.reanalyze-button:hover, .reanalyze-button:focus-visible { background: #f4e3b3; }
+.comment-position-button { width: 100%; margin: 14px 0 18px; background: #263e35; }
+.position-card { scroll-margin-top: 24px; }
+.position-card:focus-within { outline: 3px solid rgba(154, 61, 47, .25); outline-offset: 6px; }

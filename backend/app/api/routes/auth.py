@@ -187,17 +187,21 @@ def verify_email_link(token: str, db: Annotated[Session, Depends(get_db)]) -> Re
     return RedirectResponse(url="/?verified=1", status_code=303)
 
 
-def issue_tokens(db: Session, user: User) -> TokenResponse:
+def issue_tokens(db: Session, user: User, *, admin_authenticated: bool = False) -> TokenResponse:
     refresh = new_opaque_token()
     db.add(
         RefreshToken(
             user_id=user.id,
             token_hash=token_hash(refresh),
-            expires_at=datetime.now(timezone.utc) + timedelta(days=settings.refresh_token_days),
+            admin_authenticated=admin_authenticated,
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=settings.login_session_hours),
         )
     )
     db.commit()
-    return TokenResponse(access_token=create_access_token(user.id, user.is_admin), refresh_token=refresh)
+    return TokenResponse(
+        access_token=create_access_token(user.id, admin_authenticated),
+        refresh_token=refresh,
+    )
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -207,30 +211,42 @@ def login(payload: LoginRequest, db: Annotated[Session, Depends(get_db)]) -> Tok
         raise HTTPException(status_code=401, detail="メールアドレスまたはパスワードが違います。")
     if not user.email_verified:
         raise HTTPException(status_code=403, detail="メール認証を完了してください。")
-    if user.is_admin:
-        if not user.mfa_enabled or not payload.mfa_code:
-            raise HTTPException(status_code=403, detail="管理者ログインにはMFAが必要です。")
+    admin_authenticated = False
+    if user.is_admin and payload.mfa_code:
+        if not user.mfa_enabled:
+            raise HTTPException(status_code=403, detail="管理者はMFAの設定が必要です。")
         if not verify_mfa(decrypt_secret(user.mfa_secret_encrypted or ""), payload.mfa_code):
             raise HTTPException(status_code=401, detail="MFAコードが無効です。")
-    return issue_tokens(db, user)
+        admin_authenticated = True
+    return issue_tokens(db, user, admin_authenticated=admin_authenticated)
 
 
 @router.post("/refresh", response_model=TokenResponse)
 def refresh(payload: RefreshRequest, db: Annotated[Session, Depends(get_db)]) -> TokenResponse:
     stored = db.scalar(select(RefreshToken).where(RefreshToken.token_hash == token_hash(payload.refresh_token)))
     now = datetime.now(timezone.utc)
-    if stored is None or stored.revoked_at is not None or expired(stored.expires_at, now):
+    if (
+        stored is None
+        or stored.revoked_at is not None
+        or expired(stored.expires_at, now)
+        or expired(stored.created_at + timedelta(hours=settings.login_session_hours), now)
+    ):
         raise HTTPException(status_code=401, detail="更新トークンが無効です。")
     stored.revoked_at = now
     user = db.get(User, stored.user_id)
     if user is None:
         raise HTTPException(status_code=401, detail="ユーザーが見つかりません。")
-    return issue_tokens(db, user)
+    return issue_tokens(db, user, admin_authenticated=stored.admin_authenticated and user.is_admin)
 
 
 @router.get("/me")
 def me(user: Annotated[User, Depends(get_current_user)]) -> dict[str, object]:
-    return {"id": user.id, "email": user.email, "is_admin": user.is_admin, "mfa_enabled": user.mfa_enabled}
+    return {
+        "id": user.id,
+        "email": user.email,
+        "is_admin": user.is_admin and getattr(user, "_admin_authenticated", False),
+        "mfa_enabled": user.mfa_enabled,
+    }
 
 
 @router.post("/mfa/setup")
