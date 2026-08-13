@@ -1,0 +1,135 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: kifu_comment
+      POSTGRES_USER: kifu
+      POSTGRES_PASSWORD: local-development-only
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kifu -d kifu_comment"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  mailpit:
+    image: axllent/mailpit:v1.27
+    expose:
+      - "8025"
+
+  weaviate:
+    image: cr.weaviate.io/semitechnologies/weaviate:1.38.2
+    restart: on-failure:0
+    environment:
+      QUERY_DEFAULTS_LIMIT: "25"
+      PERSISTENCE_DATA_PATH: /var/lib/weaviate
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      CLUSTER_HOSTNAME: kifu-search
+      DISABLE_TELEMETRY: "true"
+    volumes:
+      - weaviate_data:/var/lib/weaviate
+    expose:
+      - "8080"
+      - "50051"
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://kifu:local-development-only@db:5432/kifu_comment
+      JWT_SECRET: ${JWT_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      BANK_FINGERPRINT_KEY: ${BANK_FINGERPRINT_KEY}
+      UPLOAD_DIR: /data/uploads
+      MAX_KIF_SIZE_BYTES: "2097152"
+      REDIS_URL: redis://redis:6379/0
+      ANALYSIS_QUEUE_ENABLED: "true"
+      EXPOSE_VERIFICATION_TOKEN: "false"
+      EMAIL_DELIVERY_ENABLED: ${EMAIL_DELIVERY_ENABLED:-true}
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_FROM: ${SMTP_FROM:-no-reply@kifu-comment.local}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
+      SMTP_SSL: ${SMTP_SSL:-false}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      AI_ACCESS_MONTHLY_PRICE_YEN: "1000"
+      AI_ACCESS_TRIAL_DAYS: "30"
+      AI_ACCESS_TEST_USER_EMAIL: ${AI_ACCESS_TEST_USER_EMAIL:-}
+      WEAVIATE_ENABLED: "true"
+      WEAVIATE_URL: http://weaviate:8080
+      ENGINE_KIND: ${ENGINE_KIND:-development}
+      YANEURAOU_PATH: ${YANEURAOU_PATH:-/opt/yaneuraou/YaneuraOu}
+      ENGINE_NODES: ${ENGINE_NODES:-10000}
+    command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2 --proxy-headers --forwarded-allow-ips=*"]
+    volumes:
+      - uploads:/data/uploads
+      - ./yaneuraou:/opt/yaneuraou:ro
+    expose:
+      - "8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+      weaviate:
+        condition: service_started
+
+  beat:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://kifu:local-development-only@db:5432/kifu_comment
+      REDIS_URL: redis://redis:6379/0
+    command: ["celery", "-A", "app.celery_app:celery_app", "beat", "--loglevel=INFO"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://kifu:local-development-only@db:5432/kifu_comment
+      REDIS_URL: redis://redis:6379/0
+      UPLOAD_DIR: /data/uploads
+      ENGINE_KIND: ${ENGINE_KIND:-development}
+      YANEURAOU_PATH: ${YANEURAOU_PATH:-/opt/yaneuraou/YaneuraOu}
+      ENGINE_NODES: ${ENGINE_NODES:-10000}
+    command: ["celery", "-A", "app.celery_app:celery_app", "worker", "--loglevel=INFO", "--concurrency=1"]
+    volumes:
+      - uploads:/data/uploads
+      - ./yaneuraou:/opt/yaneuraou:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+  redis_data:
+  uploads:
+  weaviate_data:

@@ -1,0 +1,225 @@
+import { FormEvent, useEffect, useState } from "react";
+
+type Game = { id:number; original_filename:string; event_name:string|null; sente_name:string|null; gote_name:string|null; played_at:string; user_side:"SENTE"|"GOTE"; analysis_status:string; analysis_error?:string|null; critical_position_count:number };
+type AiSubscription = { active:boolean; status:string; current_period_end:string|null; monthly_price_yen:number; trial_days:number; test_toggle_available:boolean };
+type Rewards = { pending_yen:number; fixed_yen:number; payout_available_yen:number; approved_games:number; minimum_payout_yen:number };
+type User = { id:number; email:string; is_admin:boolean; mfa_enabled:boolean };
+type Position = { id:number; move_number:number; japanese_move:string; evaluation_before:number|null; evaluation_after:number|null; selection_reason:string|null; principal_variation:string[]|null; engine_explanation_visible:boolean };
+type AiComment = { id:number; critical_position_id:number; move_number:number; generated_text:string; current_text:string; model_version:string; updated_at:string };
+type SearchResult = { source_type:string; source_id:number; game_id:number; move_number:number|null; title:string; text:string; event_name:string|null; score:number; backend:string };
+type Answer = { critical_position_id:number; question_number:number; answer_text:string };
+type Submission = { id:number; review_status:string; submitted_at:string|null; answers:(Answer & {id:number})[] };
+type ReviewItem = { id:number; game_id:number; status:string; snapshot:{positions:{id:number;move_number:number;move:string}[];answers:Answer[]}|null };
+type BoardPiece = { symbol:string; owner:"SENTE"|"GOTE" };
+type PlaybackComment = { question_number:number; question:string; answer:string };
+type EngineVariation = { evaluation:number|null; mate_in:number|null; principal_variation:string[] };
+type PlaybackFrame = { move_number:number; usi_move:string|null; japanese_move:string; board:{squares:(BoardPiece|null)[][];hands:{SENTE:{symbol:string;count:number}[];GOTE:{symbol:string;count:number}[]};turn:"SENTE"|"GOTE"};evaluation:number|null;win_rate:number|null;principal_variation:string[]|null;variations:EngineVariation[]|null;engine_name:string|null;engine_version:string|null;evaluation_function:string|null;is_critical:boolean;selection_reason:string|null;comments:PlaybackComment[] };
+type Playback = { game_id:number; filename:string; event_name:string|null; sente_name:string|null; gote_name:string|null; user_side:"SENTE"|"GOTE"; submitted:boolean; test_evaluation_toggle_available:boolean; ai_visible:boolean; frames:PlaybackFrame[] };
+
+const statusLabels:Record<string,string>={QUEUED:"解析待ち",ANALYZING:"解析中",COMMENT_REQUIRED:"コメント待ち",FAILED:"解析失敗"};
+const questions=["この局面で何を考えていましたか？","どの候補手を比較しましたか？","今振り返ると、判断の原因は何だったと思いますか？"];
+const emptyRewards:Rewards={pending_yen:0,fixed_yen:0,payout_available_yen:0,approved_games:0,minimum_payout_yen:3000};
+const answerKey=(positionId:number, question:number)=>positionId+"-"+question;
+
+export default function App(){
+  const [accessToken,setAccessToken]=useState(()=>localStorage.getItem("access_token")??"");
+  const [refreshToken,setRefreshToken]=useState(()=>localStorage.getItem("refresh_token")??"");
+  const [user,setUser]=useState<User|null>(null);
+  const [games,setGames]=useState<Game[]>([]);
+  const [rewards,setRewards]=useState<Rewards>(emptyRewards);
+  const [aiSubscription,setAiSubscription]=useState<AiSubscription>({active:false,status:"NONE",current_period_end:null,monthly_price_yen:1000,trial_days:30,test_toggle_available:false});
+  const [selectedGame,setSelectedGame]=useState<Game|null>(null);
+  const [positions,setPositions]=useState<Position[]>([]);
+  const [playback,setPlayback]=useState<Playback|null>(null);
+  const [playbackIndex,setPlaybackIndex]=useState(0);
+  const [variationIndex,setVariationIndex]=useState(0);
+  const [showTestEvaluation,setShowTestEvaluation]=useState(false);
+  const [submission,setSubmission]=useState<Submission|null>(null);
+  const [answers,setAnswers]=useState<Record<string,string>>({});
+  const [aiComments,setAiComments]=useState<AiComment[]>([]);
+  const [aiCommentDrafts,setAiCommentDrafts]=useState<Record<number,string>>({});
+  const [searchQuery,setSearchQuery]=useState("");
+  const [searchResults,setSearchResults]=useState<SearchResult[]>([]);
+  const [searching,setSearching]=useState(false);
+  const [reviews,setReviews]=useState<ReviewItem[]>([]);
+  const [error,setError]=useState("");
+  const [notice,setNotice]=useState(()=>new URLSearchParams(location.search).get("verified")?"メール認証が完了しました。ログインしてください。":"");
+  const [busy,setBusy]=useState(false);
+  const [uploadError,setUploadError]=useState("");
+  const [registering,setRegistering]=useState(false);
+
+  function saveTokens(access:string,refresh:string){
+    localStorage.setItem("access_token",access); localStorage.setItem("refresh_token",refresh);
+    setAccessToken(access); setRefreshToken(refresh);
+  }
+  function logout(){
+    localStorage.removeItem("access_token"); localStorage.removeItem("refresh_token");
+    setAccessToken(""); setRefreshToken(""); setUser(null); setGames([]); setSelectedGame(null); setPlayback(null);
+  }
+  async function refreshAccess(){
+    if(!refreshToken)return null;
+    const response=await fetch("/api/auth/refresh",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({refresh_token:refreshToken})});
+    if(!response.ok){logout();return null}
+    const tokens=await response.json(); saveTokens(tokens.access_token,tokens.refresh_token); return tokens.access_token as string;
+  }
+  async function apiFetch(path:string,init:RequestInit={},retry=true):Promise<Response>{
+    const headers=new Headers(init.headers); if(accessToken)headers.set("Authorization","Bearer "+accessToken);
+    const response=await fetch(path,{...init,headers});
+    if(response.status===401&&retry){const token=await refreshAccess();if(token){headers.set("Authorization","Bearer "+token);return fetch(path,{...init,headers})}}
+    return response;
+  }
+  async function responseError(response:Response){
+    try{const body=await response.json();return typeof body.detail==="string"?body.detail:JSON.stringify(body.detail)}
+    catch{return "HTTP "+response.status}
+  }
+  async function loadDashboard(){
+    if(!accessToken)return;
+    try{
+      const [me,gamesResponse,rewardResponse,subscriptionResponse]=await Promise.all([apiFetch("/api/auth/me"),apiFetch("/api/games"),apiFetch("/api/rewards/summary"),apiFetch("/api/ai-access/status")]);
+      if(!me.ok||!gamesResponse.ok||!rewardResponse.ok||!subscriptionResponse.ok)throw new Error("ダッシュボードを読み込めませんでした。");
+      const current=await me.json();setUser(current);setGames(await gamesResponse.json());setRewards(await rewardResponse.json());setAiSubscription(await subscriptionResponse.json());
+      if(current.is_admin&&current.mfa_enabled){const response=await apiFetch("/api/admin/reviews");if(response.ok)setReviews(await response.json())}
+      setError("");
+    }catch(reason){setError(reason instanceof Error?reason.message:"通信に失敗しました。")}
+  }
+  useEffect(()=>{void loadDashboard();if(!accessToken)return;const timer=window.setInterval(()=>void loadDashboard(),3000);return()=>window.clearInterval(timer)},[accessToken]);
+
+  async function register(event:FormEvent<HTMLFormElement>){
+    event.preventDefault();setRegistering(true);setError("");
+    const form=event.currentTarget;const data=new FormData(form);const email=String(data.get("email"));const password=String(data.get("password"));
+    try{
+      const response=await fetch("/api/auth/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,password})});
+      if(!response.ok){setError(await responseError(response));return}
+      const result:{message:string}=await response.json();
+      form.reset();setNotice(result.message+" メール内のリンクを開いてからログインしてください。");
+    }catch{setError("通信に失敗しました。時間をおいて再度お試しください。")}finally{setRegistering(false)}
+  }
+  async function resendVerification(event:FormEvent<HTMLFormElement>){
+    event.preventDefault();const form=event.currentTarget;const data=new FormData(form);
+    const response=await fetch("/api/auth/resend-verification",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:data.get("email")})});
+    if(!response.ok)return setError(await responseError(response));
+    const result:{message:string}=await response.json();form.reset();setNotice(result.message);setError("");
+  }
+  async function login(event:FormEvent<HTMLFormElement>){
+    event.preventDefault();const data=new FormData(event.currentTarget);
+    const response=await fetch("/api/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:data.get("email"),password:data.get("password"),mfa_code:data.get("mfa_code")||null})});
+    if(!response.ok)return setError(await responseError(response));const tokens=await response.json();saveTokens(tokens.access_token,tokens.refresh_token);setError("");
+  }
+  async function startAiSubscription(){
+    const response=await apiFetch("/api/ai-access/checkout",{method:"POST"});
+    if(!response.ok)return setError(await responseError(response));
+    const result:{checkout_url:string}=await response.json();window.location.assign(result.checkout_url);
+  }
+  async function toggleTestSubscription(){
+    const response=await apiFetch("/api/ai-access/test-toggle",{method:"POST"});
+    if(!response.ok)return setError(await responseError(response));
+    await loadDashboard();if(selectedGame)await openGame(selectedGame);setNotice("検証用の月額1,000円課金状態を切り替えました。");
+  }
+  async function manageAiSubscription(){
+    const response=await apiFetch("/api/ai-access/portal",{method:"POST"});
+    if(!response.ok)return setError(await responseError(response));
+    const result:{portal_url:string}=await response.json();window.location.assign(result.portal_url);
+  }
+  async function saveBankAccount(event:FormEvent<HTMLFormElement>){
+    event.preventDefault();const form=event.currentTarget;const data=new FormData(form);
+    const payload={bank_code:data.get("bank_code"),branch_code:data.get("branch_code"),account_type:data.get("account_type"),account_number:data.get("account_number"),account_holder:data.get("account_holder")};
+    const response=await apiFetch("/api/rewards/bank-account",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+    if(!response.ok)return setError(await responseError(response));setNotice("振込口座を登録しました。");setError("");
+  }
+  async function requestPayout(){
+    const response=await apiFetch("/api/rewards/payouts",{method:"POST"});
+    if(!response.ok)return setError(await responseError(response));const result=await response.json();setNotice(yen.format(result.amount_yen)+"の振込を申請しました。");setError("");await loadDashboard();
+  }
+  async function downloadPayoutCsv(){
+    const response=await apiFetch("/api/rewards/payouts.csv");if(!response.ok)return setError(await responseError(response));
+    const url=URL.createObjectURL(await response.blob());const anchor=document.createElement("a");anchor.href=url;anchor.download="payouts.csv";anchor.click();URL.revokeObjectURL(url);
+  }
+  async function upload(event:FormEvent<HTMLFormElement>){
+    event.preventDefault();
+    const form=event.currentTarget;const data=new FormData(form);
+    const file=data.get("game_file");const hasFile=file instanceof File&&file.size>0;
+    const hasText=String(data.get("game_text")??"").trim().length>0;
+    if(hasFile===hasText){setUploadError("棋譜ファイルまたは貼り付け棋譜のどちらか一方を入力してください。");return}
+    setBusy(true);setUploadError("");setError("");setNotice("");
+    try{
+      const response=await apiFetch("/api/games",{method:"POST",body:data});
+      if(!response.ok){setUploadError(await responseError(response));return}
+      form.reset();setNotice("棋譜を受け付けました。");await loadDashboard();
+    }catch{setUploadError("通信に失敗しました。時間をおいて再度お試しください。")}finally{setBusy(false)}
+  }
+
+  async function deleteGame(game:Game){
+    if(!window.confirm(`「${game.original_filename}」を削除しますか？\n解析結果や下書きも削除され、元に戻せません。`))return;
+    const response=await apiFetch("/api/games/"+game.id,{method:"DELETE"});
+    if(!response.ok){setError(await responseError(response));return}
+    if(selectedGame?.id===game.id){setSelectedGame(null);setPlayback(null);setPlaybackIndex(0);setShowTestEvaluation(false);setPositions([]);setSubmission(null);setAnswers({})}
+    setNotice("棋譜を削除しました。");setError("");await loadDashboard();
+  }
+
+  async function openGame(game:Game){
+    setSelectedGame(game);const base="/api/games/"+game.id;
+    const [pResponse,cResponse,playbackResponse,aiResponse]=await Promise.all([apiFetch(base+"/critical-positions"),apiFetch(base+"/comments"),apiFetch(base+"/playback"),apiFetch(base+"/ai-comments")]);
+    if(!pResponse.ok||!cResponse.ok||!playbackResponse.ok)return setError("棋譜と重要局面を読み込めませんでした。");
+    const loadedPositions=await pResponse.json();const loadedSubmission=await cResponse.json();const loadedPlayback=await playbackResponse.json();
+    setPositions(loadedPositions);setSubmission(loadedSubmission);setPlayback(loadedPlayback);setPlaybackIndex(0);setShowTestEvaluation(false);
+    const next:Record<string,string>={};for(const answer of loadedSubmission.answers)next[answerKey(answer.critical_position_id,answer.question_number)]=answer.answer_text;setAnswers(next);
+    if(aiResponse.ok){const loadedAi=await aiResponse.json();setAiComments(loadedAi);setAiCommentDrafts(Object.fromEntries(loadedAi.map((item:AiComment)=>[item.id,item.current_text])))}else{setAiComments([]);setAiCommentDrafts({})}
+  }
+
+  async function saveAiComment(comment:AiComment){
+    if(!selectedGame)return;const text=aiCommentDrafts[comment.id]??comment.current_text;const response=await apiFetch("/api/games/"+selectedGame.id+"/ai-comments/"+comment.id,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({text})});
+    if(!response.ok){setError(await responseError(response));return}const updated=await response.json();setAiComments(aiComments.map(item=>item.id===updated.id?updated:item));setNotice("AIコメントの修正を学習データとして保存しました。");
+  }
+
+  async function runSearch(event:FormEvent<HTMLFormElement>){
+    event.preventDefault();const query=searchQuery.trim();if(!query)return;setSearching(true);setError("");
+    try{const response=await apiFetch("/api/search?q="+encodeURIComponent(query));if(!response.ok){setError(await responseError(response));return}const body:{results:SearchResult[]}=await response.json();setSearchResults(body.results)}
+    catch{setError("検索に失敗しました。時間をおいて再度お試しください。")}finally{setSearching(false)}
+  }
+
+  async function openSearchResult(result:SearchResult){
+    const game=games.find(item=>item.id===result.game_id);if(!game)return;await openGame(game);if(result.move_number!==null)setPlaybackIndex(result.move_number);
+  }
+
+  function answerList():Answer[]{return positions.flatMap(position=>questions.map((_,index)=>({critical_position_id:position.id,question_number:index+1,answer_text:answers[answerKey(position.id,index+1)]??""})))}
+  async function saveDraft(){
+    if(!selectedGame)return false;const response=await apiFetch("/api/games/"+selectedGame.id+"/comments/draft",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({answers:answerList()})});
+    if(!response.ok){setError(await responseError(response));return false}setSubmission(await response.json());setNotice("下書きを保存しました。");return true;
+  }
+  async function submitComments(){
+    if(!selectedGame||!await saveDraft())return;const response=await apiFetch("/api/games/"+selectedGame.id+"/comments/submit",{method:"POST"});
+    if(!response.ok)return setError(await responseError(response));setNotice("コメントを提出しました。");await openGame(selectedGame);
+  }
+  async function review(id:number,status:string){
+    const reason=window.prompt("審査理由を入力してください。");if(!reason)return;
+    const tagText=window.prompt("品質タグをカンマ区切りで入力してください。","")??"";
+    const quality_tags=tagText.split(",").map(tag=>tag.trim()).filter(Boolean);
+    const response=await apiFetch("/api/admin/reviews/"+id,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({status,reason,quality_tags})});
+    if(!response.ok)setError(await responseError(response));else await loadDashboard();
+  }
+
+  const yen=new Intl.NumberFormat("ja-JP",{style:"currency",currency:"JPY"});
+  const currentFrame=playback?.frames[playbackIndex]??null;
+  const selectedVariation=currentFrame?.variations?.[variationIndex]??null;
+  useEffect(()=>setVariationIndex(0),[playbackIndex,playback?.game_id]);
+  if(!accessToken)return <main className="auth-page"><h1>棋譜コメント研究所</h1>{error&&<p className="alert">{error}</p>}{notice&&<p className="notice">{notice}</p>}<div className="auth-grid">
+    <section className="card"><h2>ログイン</h2><form onSubmit={login}><label>メール<input name="email" type="email" required/></label><label>パスワード<input name="password" type="password" required/></label><label>MFAコード（管理者）<input name="mfa_code" inputMode="numeric"/></label><button>ログイン</button></form></section>
+    <section className="card"><h2>新規登録</h2><form onSubmit={register}><label>メール<input name="email" type="email" autoComplete="email" required/></label><label>パスワード（12文字以上）<input name="password" type="password" autoComplete="new-password" minLength={12} required/></label><button disabled={registering}>{registering?"送信中…":"確認メールを送る"}</button></form><hr/><h3>確認メールを再送</h3><form onSubmit={resendVerification}><label>登録メール<input name="email" type="email" autoComplete="email" required/></label><button>再送する</button></form></section>
+  </div></main>;
+
+  return <><header className="site-header"><div><span className="eyebrow">KIFU COMMENT LAB</span><h1>棋譜コメント研究所</h1></div><div className="button-row"><span>{user?.email??"読込中"}</span>{aiSubscription.test_toggle_available&&<button className="link-button subscription-toggle" onClick={()=>void toggleTestSubscription()}>1,000円課金 {aiSubscription.active?"ON":"OFF"}</button>}<button className="link-button" onClick={logout}>ログアウト</button></div></header><main>
+    {error&&<p className="alert">{error}</p>}{notice&&<p className="notice">{notice}</p>}
+    <section className="card search-card"><span className="eyebrow">WEAVIATE SEARCH</span><h3>棋譜・局面・コメントを検索</h3><form className="search-form" onSubmit={runSearch}><label htmlFor="global-search">検索語</label><div className="search-input-row"><input id="global-search" type="search" value={searchQuery} onChange={event=>setSearchQuery(event.target.value)} placeholder="例：終盤の逆転、飛車を切った局面" maxLength={200}/><button disabled={searching||!searchQuery.trim()}>{searching?"検索中…":"検索"}</button></div></form>{searchResults.length>0?<div className="search-results">{searchResults.map(result=><button type="button" className="search-result" key={result.source_type+"-"+result.source_id} onClick={()=>void openSearchResult(result)}><strong>{result.title}</strong><span>{result.event_name??"棋戦名不明"}{result.move_number!==null?"・"+result.move_number+"手目":""}</span><p>{result.text}</p><small>{result.backend==="weaviate"?"Weaviate検索":"DB検索"}</small></button>)}</div>:searchQuery&&!searching&&<p className="empty">該当するデータはありません。</p>}</section>
+    <section className="hero"><div><p className="eyebrow">対局を、次の一手の力に。</p><h2>形勢が動いた瞬間を<br/>自分の言葉で振り返る。</h2></div><div className="reward-panel"><span>確定報酬</span><strong>{yen.format(rewards.fixed_yen)}</strong><small>承認済み {rewards.approved_games} 棋譜</small></div></section>
+    <section className="stats"><article><span>コメント待ち</span><strong>{games.filter(g=>g.analysis_status==="COMMENT_REQUIRED").length}</strong><small>棋譜</small></article><article><span>保留報酬</span><strong>{yen.format(rewards.pending_yen)}</strong><small>上限確認中</small></article><article><span>振込可能額</span><strong>{yen.format(rewards.payout_available_yen)}</strong><small>最低 {yen.format(rewards.minimum_payout_yen)}</small></article></section>
+    <section className="card"><span className="eyebrow">AI PLAN</span><h3>AI解説プラン</h3>{aiSubscription.active?<><p className="notice">月額プラン契約中{aiSubscription.current_period_end?"・有効期限 "+aiSubscription.current_period_end.slice(0,10):""}</p>{!aiSubscription.test_toggle_available&&<button onClick={()=>void manageAiSubscription()}>契約内容・解約を管理</button>}</>:<><p>評価値はコメント提出後に無料で表示されます。AIコメントと読み筋は初回1か月無料、その後は月額{yen.format(aiSubscription.monthly_price_yen)}です。</p><button onClick={()=>void startAiSubscription()}>1か月無料で試す</button></>}</section>
+    <section className="card"><span className="eyebrow">PAYOUT</span><h3>振込口座と申請</h3><form onSubmit={saveBankAccount}><div className="form-row"><label>銀行コード<input name="bank_code" inputMode="numeric" pattern="[0-9]{4}" maxLength={4} required/></label><label>支店コード<input name="branch_code" inputMode="numeric" pattern="[0-9]{3}" maxLength={3} required/></label></div><div className="form-row"><label>口座種別<select name="account_type"><option value="ORDINARY">普通</option><option value="CURRENT">当座</option></select></label><label>口座番号<input name="account_number" inputMode="numeric" pattern="[0-9]{7}" maxLength={7} required/></label></div><label>口座名義<input name="account_holder" maxLength={100} required/></label><div className="button-row"><button>口座を保存</button><button type="button" disabled={rewards.payout_available_yen===0} onClick={()=>void requestPayout()}>振込を申請</button></div></form>{user?.is_admin&&user.mfa_enabled&&<button onClick={()=>void downloadPayoutCsv()}>振込CSVを出力</button>}</section>
+    <div className="content-grid"><section className="card"><span className="eyebrow">UPLOAD</span><h3>棋譜を解析する</h3><form onSubmit={upload}><label>棋譜ファイル（貼り付ける場合は不要）<input name="game_file" type="file" accept=".kif,.ki2,.csa,.txt"/></label><div className="input-separator">または</div><label>クリップボードから貼り付け<textarea name="game_text" className="game-text-input" placeholder="KIF・KI2・CSA・USI形式を自動判定します"/></label><small className="input-help">ファイルか貼り付けのどちらか一方を入力してください。</small>{uploadError&&<p className="alert upload-error" role="alert">{uploadError}</p>}<div className="form-row"><label>対局日<input name="played_at" type="date" required/></label><label>あなたの手番<select name="user_side"><option value="SENTE">先手</option><option value="GOTE">後手</option></select></label></div><label className="check"><input name="ownership_confirmed" type="checkbox" value="true" required/>本人対局で、過去に投稿していません。</label><button disabled={busy}>{busy?"受付中…":"解析を申し込む"}</button></form></section>
+      <section className="card"><span className="eyebrow">RECENT GAMES</span><h3>最近の棋譜</h3><div className="game-list">{games.length===0&&<p className="empty">棋譜はまだありません。</p>}{games.map(game=><div className="game-list-row" key={game.id}><button className="game-row game-button" onClick={()=>void openGame(game)}><div className="move-icon">{game.critical_position_count||"–"}</div><div><strong>{game.original_filename}</strong><small>{game.event_name??"棋戦名不明"}・先手 {game.sente_name??"不明"} / 後手 {game.gote_name??"不明"}</small><small>{game.played_at}・投稿者は{game.user_side==="SENTE"?"先手":"後手"}</small></div><span className={"status status-"+game.analysis_status.toLowerCase()}>{statusLabels[game.analysis_status]??game.analysis_status}</span></button><button type="button" className="delete-game-button" aria-label={`${game.original_filename}を削除`} onClick={()=>void deleteGame(game)}>削除</button></div>)}
+</div></section></div>
+    {selectedGame&&playback&&currentFrame&&<section className="card playback-card"><div className="section-title"><div><span className="eyebrow">GAME PLAYER</span><h3>棋譜再生</h3><p className="game-metadata">{playback.event_name??"棋戦名不明"}<br/>先手 {playback.sente_name??"不明"} / 後手 {playback.gote_name??"不明"}</p></div><strong>{currentFrame.move_number}手目・{currentFrame.japanese_move}</strong></div><div className="playback-layout"><div className="board-area"><div className="piece-stand"><span>後手の持ち駒</span><strong>{currentFrame.board.hands.GOTE.length?currentFrame.board.hands.GOTE.map(item=>item.symbol+(item.count>1?item.count:"")).join(" "):"なし"}</strong></div><div className="board-files">{[9,8,7,6,5,4,3,2,1].map(file=><span key={file}>{file}</span>)}</div><div className="shogi-board" aria-label={`${currentFrame.move_number}手目の盤面`}>{currentFrame.board.squares.flatMap((row,rank)=>row.map((piece,file)=><div className="board-square" key={`${rank}-${file}`}>{piece&&<span className={piece.owner==="GOTE"?"gote-piece":""}>{piece.symbol}</span>}</div>))}</div><div className="piece-stand"><span>先手の持ち駒</span><strong>{currentFrame.board.hands.SENTE.length?currentFrame.board.hands.SENTE.map(item=>item.symbol+(item.count>1?item.count:"")).join(" "):"なし"}</strong></div><div className="playback-controls"><button type="button" onClick={()=>setPlaybackIndex(0)} disabled={playbackIndex===0}>最初</button><button type="button" onClick={()=>setPlaybackIndex(Math.max(0,playbackIndex-1))} disabled={playbackIndex===0}>前へ</button><button type="button" onClick={()=>setPlaybackIndex(Math.min(playback.frames.length-1,playbackIndex+1))} disabled={playbackIndex===playback.frames.length-1}>次へ</button><button type="button" onClick={()=>setPlaybackIndex(playback.frames.length-1)} disabled={playbackIndex===playback.frames.length-1}>最後</button></div><input className="move-slider" type="range" min="0" max={playback.frames.length-1} value={playbackIndex} onChange={event=>setPlaybackIndex(Number(event.target.value))} aria-label="再生手数"/></div><aside className="playback-info"><div className="turn-indicator">次の手番：{currentFrame.board.turn==="SENTE"?"先手":"後手"}</div>{currentFrame.engine_name&&<p className="engine-identity"><strong>{currentFrame.engine_name==="YaneuraOu"?"やねうら王":currentFrame.engine_name}</strong>{currentFrame.engine_version&&<>・{currentFrame.engine_version}</>}{currentFrame.evaluation_function&&<>／評価関数 {currentFrame.evaluation_function==="Suisho5"?"水匠5":currentFrame.evaluation_function}</>}</p>}{currentFrame.is_critical&&<span className="critical-badge">重要局面</span>}<div className="evaluation-heading"><h4>評価値</h4>{playback.test_evaluation_toggle_available&&<button type="button" className="evaluation-toggle" onClick={()=>setShowTestEvaluation(!showTestEvaluation)}>{showTestEvaluation?"評価値を隠す":"評価値を表示"}</button>}</div>{(playback.submitted||playback.test_evaluation_toggle_available&&showTestEvaluation)?<p className="evaluation-value">{currentFrame.evaluation??"–"}{currentFrame.win_rate!==null&&<small> 勝率 {currentFrame.win_rate}%</small>}</p>:<p className="empty">{playback.test_evaluation_toggle_available?"「評価値を表示」を押すと確認できます。":"コメント提出後に表示されます。"}</p>}
+<h4>読み筋・分岐（5候補・各5手先）</h4>{currentFrame.variations?.length&&selectedVariation?<div className="engine-variations"><div className="variation-tabs" role="tablist" aria-label="予測分岐">{currentFrame.variations.map((variation,index)=><button type="button" role="tab" aria-selected={variationIndex===index} className={variationIndex===index?"active":""} key={index} onClick={()=>setVariationIndex(index)}>候補 {index+1}<small>評価 {variation.mate_in!==null?"詰み "+variation.mate_in:variation.evaluation??"–"}</small></button>)}</div><article><strong>候補 {variationIndex+1}の5手先までの予測</strong><ol className="variation-list">{selectedVariation.principal_variation.slice(0,5).map((move,moveIndex)=><li key={move+"-"+moveIndex}>{move}</li>)}</ol></article></div>:<p className="empty">{playback.ai_visible?"この手の読み筋はありません。":"AIプラン契約後に表示されます。"}</p>}{currentFrame.selection_reason&&<p>{currentFrame.selection_reason}</p>}<h4>コメント</h4>{currentFrame.comments.length?currentFrame.comments.map(comment=><div className="playback-comment" key={comment.question_number}><strong>{comment.question_number}. {comment.question}</strong><p>{comment.answer||"未入力"}</p></div>):<p className="empty">この手には重要局面コメントがありません。</p>}<div className="critical-jumps"><strong>重要局面へ移動</strong>{playback.frames.filter(frame=>frame.is_critical).map(frame=><button type="button" key={frame.move_number} onClick={()=>setPlaybackIndex(frame.move_number)}>{frame.move_number}手目</button>)}</div></aside></div></section>}
+    {selectedGame&&<section className="card reflection"><span className="eyebrow">REFLECTION</span><h3>{selectedGame.original_filename} の重要局面</h3>{positions.length===0&&<p>解析中、または重要局面がありません。</p>}{positions.map(position=><article className="position-card" key={position.id}><h4>{position.move_number}手目・{position.japanese_move}</h4>{questions.map((question,index)=><label key={question}>{index+1}. {question}<textarea value={answers[answerKey(position.id,index+1)]??""} onChange={event=>setAnswers({...answers,[answerKey(position.id,index+1)]:event.target.value})} disabled={Boolean(submission?.submitted_at)} required/></label>)}{position.engine_explanation_visible&&<div className="engine-result"><strong>評価: {position.evaluation_before} → {position.evaluation_after}</strong>{position.selection_reason&&<p>{position.selection_reason}</p>}{position.principal_variation&&<p><strong>読み筋:</strong> {position.principal_variation.length?position.principal_variation.join(" → "):"読み筋はありません。"}</p>}</div>}</article>)}{positions.length>0&&!submission?.submitted_at&&<div className="button-row"><button onClick={()=>void saveDraft()}>下書き保存</button><button onClick={()=>void submitComments()}>一括提出</button></div>}{submission?.submitted_at&&<p className="notice">提出済み・{submission.review_status}</p>}{submission?.submitted_at&&!aiSubscription.active&&<p className="alert">AIコメントと読み筋は月額プラン登録後に表示されます。</p>}{submission?.submitted_at&&aiSubscription.active&&<div className="ai-comment-section"><h3>収集コメントから生成したAIコメント</h3><p className="input-help">修正内容は同じ手数の次回生成に反映されます。</p>{aiComments.length?aiComments.map(comment=><article className="ai-comment-editor" key={comment.id}><strong>{comment.move_number}手目</strong><textarea value={aiCommentDrafts[comment.id]??comment.current_text} onChange={event=>setAiCommentDrafts({...aiCommentDrafts,[comment.id]:event.target.value})}/><button type="button" onClick={()=>void saveAiComment(comment)}>修正を保存・学習</button></article>):<p className="empty">AIコメントを生成中です。</p>}</div>}</section>}
+    {user?.is_admin&&user.mfa_enabled&&<section className="card admin-card"><span className="eyebrow">ADMIN</span><h3>審査対象</h3>{reviews.map(item=><article key={item.id} className="review-row"><span>投稿 #{item.id}・棋譜 #{item.game_id}・{item.status}</span>{item.snapshot?.positions.map(position=><div key={position.id}><strong>{position.move_number}手目・{position.move}</strong>{item.snapshot?.answers.filter(answer=>answer.critical_position_id===position.id).sort((a,b)=>a.question_number-b.question_number).map(answer=><p key={answer.question_number}>{answer.question_number}. {answer.answer_text}</p>)}</div>)}{item.status==="UNDER_REVIEW"&&<div className="button-row"><button onClick={()=>void review(item.id,"APPROVED")}>承認</button><button onClick={()=>void review(item.id,"CHANGES_REQUESTED")}>差し戻し</button><button onClick={()=>void review(item.id,"REJECTED")}>却下</button></div>}</article>)}</section>}
+  </main></>;
+}
