@@ -67,6 +67,7 @@ class Game(Base):
     source_encoding: Mapped[str] = mapped_column(String(20))
     played_at: Mapped[date] = mapped_column(Date)
     user_side: Mapped[str] = mapped_column(String(5))
+    is_public: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     initial_sfen: Mapped[str] = mapped_column(Text)
     usi_moves: Mapped[list[str]] = mapped_column(JSON)
     move_count: Mapped[int] = mapped_column(Integer)
@@ -84,6 +85,21 @@ class Game(Base):
     critical_positions: Mapped[list["CriticalPosition"]] = relationship(back_populates="game", cascade="all, delete-orphan")
 
     __table_args__ = (Index("ix_games_user_created_at", "user_id", "created_at"),)
+
+
+class ProfessionalGameFingerprint(Base):
+    """投稿拒否の照合に使うプロ棋譜の最小限の識別情報。"""
+
+    __tablename__ = "professional_game_fingerprints"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    normalized_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    source_name: Mapped[str] = mapped_column(String(255))
+    source_reference: Mapped[str | None] = mapped_column(String(512))
+    event_name: Mapped[str | None] = mapped_column(String(255))
+    sente_name: Mapped[str | None] = mapped_column(String(255))
+    gote_name: Mapped[str | None] = mapped_column(String(255))
+    played_at: Mapped[date | None] = mapped_column(Date)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class AnalysisJobOutbox(Base):
