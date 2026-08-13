@@ -111,16 +111,13 @@ def test_comment_privacy_submission_review_and_reward() -> None:
                 {"critical_position_id": position.id, "question_number": 1, "answer_text": "回答"}
             ]
         }
-        assert client.put(f"/api/games/{game.id}/comments/draft", json=incomplete).status_code == 200
-        assert client.post(f"/api/games/{game.id}/comments/submit").status_code == 422
+        empty = {"answers": [{"critical_position_id": position.id, "question_number": 1, "answer_text": ""}]}
+        assert client.put(f"/api/games/{game.id}/comments/draft", json=empty).status_code == 200
+        empty_submit = client.post(f"/api/games/{game.id}/comments/submit")
+        assert empty_submit.status_code == 422
+        assert empty_submit.json()["detail"] == "コメントを1つ以上入力してください。"
 
-        complete = {
-            "answers": [
-                {"critical_position_id": position.id, "question_number": question, "answer_text": f"回答{question}"}
-                for question in range(1, 4)
-            ]
-        }
-        assert client.put(f"/api/games/{game.id}/comments/draft", json=complete).status_code == 200
+        assert client.put(f"/api/games/{game.id}/comments/draft", json=incomplete).status_code == 200
         submitted = client.post(f"/api/games/{game.id}/comments/submit")
         assert submitted.status_code == 200
         paywalled = client.get(f"/api/games/{game.id}/critical-positions").json()[0]
@@ -131,7 +128,7 @@ def test_comment_privacy_submission_review_and_reward() -> None:
         paywalled_playback = client.get(f"/api/games/{game.id}/playback").json()
         assert paywalled_playback["frames"][1]["evaluation"] == -500
         assert paywalled_playback["frames"][1]["principal_variation"] is None
-        assert paywalled_playback["frames"][1]["comments"][0]["answer"] == "回答1"
+        assert paywalled_playback["frames"][1]["comments"][0]["answer"] == "回答"
         with sessions() as payment_db:
             payment_db.add(AiAccessSubscription(
                 user_id=owner.id,
@@ -144,7 +141,7 @@ def test_comment_privacy_submission_review_and_reward() -> None:
         assert ai_comments.status_code == 200
         ai_comment = ai_comments.json()[0]
         assert ai_comment["move_number"] == position.move_number
-        assert "回答1" in ai_comment["current_text"]
+        assert "回答" in ai_comment["current_text"]
         corrected_text = "修正済みのAIコメント"
         corrected = client.put(f"/api/games/{game.id}/ai-comments/{ai_comment['id']}", json={"text": corrected_text})
         assert corrected.status_code == 200
@@ -155,7 +152,7 @@ def test_comment_privacy_submission_review_and_reward() -> None:
 
         previous_weaviate_enabled = settings.weaviate_enabled
         settings.weaviate_enabled = False
-        searched = client.get("/api/search", params={"q": "回答1"})
+        searched = client.get("/api/search", params={"q": "回答"})
         settings.weaviate_enabled = previous_weaviate_enabled
         assert searched.status_code == 200
         assert searched.json()["results"][0]["game_id"] == game.id
@@ -164,17 +161,22 @@ def test_comment_privacy_submission_review_and_reward() -> None:
         visible = client.get(f"/api/games/{game.id}/critical-positions").json()[0]
         assert visible["evaluation_after"] == -500
         assert visible["engine_explanation_visible"] is True
-        assert visible["principal_variation"] == ["3c3d", "2g2f"]
+        assert visible["principal_variation"] == ["３四歩(33)", "２六歩(27)"]
         visible_playback = client.get(f"/api/games/{game.id}/playback").json()
         assert visible_playback["frames"][1]["principal_variation"] == ["３四歩(33)", "２六歩(27)"]
 
         app.dependency_overrides[require_admin] = lambda: admin
         reviews = client.get("/api/admin/reviews").json()
+        assert reviews[0]["snapshot"]["positions"][0]["move"] == "７六歩(77)"
+        assert len(reviews[0]["snapshot"]["answers"]) == 3
+        with sessions() as snapshot_db:
+            saved_snapshot = snapshot_db.scalar(select(CommentSubmission)).submitted_snapshot
+            assert len(saved_snapshot["answers"]) == 1
         detail = client.get(f"/api/admin/reviews/{reviews[0]['id']}")
         assert detail.status_code == 200
         assert detail.json()["game"]["filename"] == "workflow.kif"
-        assert detail.json()["snapshot"]["answers"][0]["answer_text"] == "回答1"
-        assert detail.json()["positions"][0]["principal_variation"] == ["3c3d", "2g2f"]
+        assert detail.json()["snapshot"]["answers"][0]["answer_text"] == "回答"
+        assert detail.json()["positions"][0]["principal_variation"] == ["３四歩(33)", "２六歩(27)"]
         review_response = client.post(
             f"/api/admin/reviews/{reviews[0]['id']}",
             json={"status": "APPROVED", "reason": "内容を確認", "quality_tags": ["complete"]},

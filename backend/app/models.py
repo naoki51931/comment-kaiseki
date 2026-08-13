@@ -87,6 +87,22 @@ class Game(Base):
     __table_args__ = (Index("ix_games_user_created_at", "user_id", "created_at"),)
 
 
+class GameBranch(Base):
+    __tablename__ = "game_branches"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    game_id: Mapped[int] = mapped_column(ForeignKey("games.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(50))
+    base_move_number: Mapped[int] = mapped_column(Integer)
+    usi_moves: Mapped[list[str]] = mapped_column(JSON)
+    japanese_moves: Mapped[list[str]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (UniqueConstraint("game_id", "name", name="uq_game_branch_name"),)
+
+
 class ProfessionalGameFingerprint(Base):
     """投稿拒否の照合に使うプロ棋譜の最小限の識別情報。"""
 
@@ -126,6 +142,10 @@ class AnalysisResult(Base):
     win_rate_user: Mapped[int | None] = mapped_column(Integer)
     principal_variation: Mapped[list[str] | None] = mapped_column(JSON)
     variations: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
+    pre_move_variations: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
+    best_evaluation_user: Mapped[int | None] = mapped_column(Integer)
+    best_mate_in_user: Mapped[int | None] = mapped_column(Integer)
+    mate_in_user: Mapped[int | None] = mapped_column(Integer)
     is_mate: Mapped[bool] = mapped_column(Boolean, default=False)
     engine_name: Mapped[str] = mapped_column(String(100))
     engine_version: Mapped[str] = mapped_column(String(100))
@@ -134,6 +154,43 @@ class AnalysisResult(Base):
 
     game: Mapped[Game] = relationship(back_populates="analysis_results")
     __table_args__ = (UniqueConstraint("game_id", "move_number", name="uq_analysis_game_move"),)
+
+
+class GameSkillAnalysis(Base):
+    __tablename__ = "game_skill_analyses"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    game_id: Mapped[int] = mapped_column(ForeignKey("games.id", ondelete="CASCADE"), index=True)
+    played_at: Mapped[date] = mapped_column(Date, index=True)
+    estimated_rating: Mapped[int] = mapped_column(Integer)
+    estimated_rank: Mapped[str] = mapped_column(String(20))
+    average_eval_loss: Mapped[int] = mapped_column(Integer)
+    best_move_match_rate: Mapped[int] = mapped_column(Integer)
+    top3_match_rate: Mapped[int] = mapped_column(Integer)
+    opening_score: Mapped[int] = mapped_column(Integer)
+    middlegame_score: Mapped[int] = mapped_column(Integer)
+    endgame_score: Mapped[int] = mapped_column(Integer)
+    blunder_count: Mapped[int] = mapped_column(Integer, default=0)
+    major_blunder_count: Mapped[int] = mapped_column(Integer, default=0)
+    mate_opportunities: Mapped[int] = mapped_column(Integer, default=0)
+    mate_found: Mapped[int] = mapped_column(Integer, default=0)
+    mate_missed: Mapped[int] = mapped_column(Integer, default=0)
+    mate_events: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    winning_positions: Mapped[int] = mapped_column(Integer, default=0)
+    winning_positions_converted: Mapped[int] = mapped_column(Integer, default=0)
+    winning_position_drops: Mapped[int] = mapped_column(Integer, default=0)
+    recovery_count: Mapped[int] = mapped_column(Integer, default=0)
+    overall_score: Mapped[int] = mapped_column(Integer)
+    analyzed_move_count: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("game_id", name="game_skill_analyses_game_id_key"),
+        Index("ix_game_skill_analyses_game_id", "game_id", unique=True),
+        Index("ix_game_skill_user_played", "user_id", "played_at"),
+    )
 
 
 class CriticalPosition(Base):
@@ -249,6 +306,7 @@ class RefreshToken(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    admin_authenticated: Mapped[bool] = mapped_column(Boolean, default=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

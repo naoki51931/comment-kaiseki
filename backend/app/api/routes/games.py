@@ -13,10 +13,11 @@ from app.config import settings
 from app.database import get_db
 from app.models import (
     AnalysisJobOutbox, AnalysisResult, AnalysisStatus, CommentAnswer, CommentSubmission,
-    CriticalPosition as CriticalPositionModel, Game as GameModel, Review, RewardLedger, User,
+    CriticalPosition as CriticalPositionModel, Game as GameModel, GameBranch, GameSkillAnalysis, Review, RewardLedger, User,
 )
-from app.schemas import CriticalPosition, Game, GameVisibilityUpdate
-from app.services.analysis import japanese_move_at
+from app.schemas import BranchAnalysis, BranchPosition, BranchPositionRequest, BranchSaveRequest, CriticalPosition, Game, GameVisibilityUpdate, SavedBranch
+from app.services.analysis import japanese_move_at, japanese_variation_at, normalize_evaluation, normalize_mate, win_rate
+from app.services.engine import create_engine_adapter
 from shogi.KIF import Exporter as KifExporter
 from app.services.kif import KifValidationError, parse_game_file, parse_game_text
 from app.services.professional_games import is_professional_game
@@ -69,6 +70,57 @@ def japanese_variation(board: shogi.Board, moves: list[str] | None) -> list[str]
             result.append(move_text)
             break
     return result
+
+
+def branch_position(game: GameModel, request: BranchPositionRequest) -> BranchPosition:
+    if request.move_number > game.move_count:
+        raise HTTPException(status_code=422, detail="分岐開始局面が棋譜の手数を超えています。")
+    board = shogi.Board(game.initial_sfen)
+    try:
+        for move_text in game.usi_moves[:request.move_number]:
+            board.push_usi(move_text)
+        japanese_moves: list[str] = []
+        for move_text in request.moves:
+            move = shogi.Move.from_usi(move_text)
+            if move not in board.legal_moves:
+                raise ValueError
+            japanese_moves.append(KifExporter.kif_move_from(move_text, board))
+            board.push(move)
+    except (ValueError, IndexError, AttributeError):
+        raise HTTPException(status_code=422, detail="分岐手順に現在局面では指せない手が含まれています。") from None
+
+    legal_moves = []
+    for move in board.legal_moves:
+        usi = move.usi()
+        legal_moves.append({
+            "usi": usi,
+            "from_square": shogi.SQUARE_NAMES[move.from_square] if move.from_square is not None else None,
+            "to_square": shogi.SQUARE_NAMES[move.to_square],
+            # USIの駒打ちは P*5e のように大文字で表現する。
+            "drop_piece": shogi.PIECE_SYMBOLS[move.drop_piece_type].upper() if move.drop_piece_type else None,
+            "promote": move.promotion,
+            "japanese_move": KifExporter.kif_move_from(usi, board),
+        })
+    return BranchPosition(
+        board=board_snapshot(board), turn="SENTE" if board.turn == shogi.BLACK else "GOTE",
+        moves=request.moves, japanese_moves=japanese_moves, legal_moves=legal_moves,
+        game_over=board.is_game_over(),
+    )
+
+
+def branch_board(game: GameModel, request: BranchPositionRequest) -> shogi.Board:
+    board = shogi.Board(game.initial_sfen)
+    try:
+        for move_text in game.usi_moves[:request.move_number]:
+            board.push_usi(move_text)
+        for move_text in request.moves:
+            move = shogi.Move.from_usi(move_text)
+            if move not in board.legal_moves:
+                raise ValueError
+            board.push(move)
+    except (ValueError, IndexError, AttributeError):
+        raise HTTPException(status_code=422, detail="分岐手順に現在局面では指せない手が含まれています。") from None
+    return board
 
 
 
@@ -214,6 +266,40 @@ def delete_game(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@router.post("/{game_id}/reanalyze", response_model=Game, status_code=status.HTTP_202_ACCEPTED)
+def reanalyze_game(
+    game_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> GameModel:
+    game = db.get(GameModel, game_id)
+    if game is None or game.user_id != user.id:
+        raise HTTPException(status_code=404, detail="棋譜が見つかりません。")
+    if game.analysis_status in {AnalysisStatus.QUEUED.value, AnalysisStatus.ANALYZING.value}:
+        raise HTTPException(status_code=409, detail="この棋譜はすでに解析待ち、または解析中です。")
+    db.execute(delete(GameSkillAnalysis).where(GameSkillAnalysis.game_id == game_id))
+    outbox = db.scalar(select(AnalysisJobOutbox).where(AnalysisJobOutbox.game_id == game_id))
+    if settings.analysis_queue_enabled:
+        if outbox is None:
+            outbox = AnalysisJobOutbox(game_id=game.id)
+            db.add(outbox)
+        else:
+            outbox.sent_at = None
+            outbox.attempt_count = 0
+            outbox.last_error = None
+    game.analysis_status = AnalysisStatus.QUEUED.value
+    game.analysis_error = None
+    game.analysis_retry_count = 0
+    game.analysis_started_at = None
+    game.analysis_completed_at = None
+    db.commit()
+    db.refresh(game)
+    if outbox is not None:
+        db.refresh(outbox)
+        dispatch_analysis_outbox(db, outbox.id)
+    return game
+
+
 @router.patch("/{game_id}/visibility", response_model=Game)
 def update_game_visibility(
     game_id: int,
@@ -324,6 +410,152 @@ def game_playback(
         "frames": frames,
     }
 
+
+@router.post("/{game_id}/branch-position", response_model=BranchPosition)
+def get_branch_position(
+    game_id: int,
+    request: BranchPositionRequest,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> BranchPosition:
+    game = db.get(GameModel, game_id)
+    if game is None or game.user_id != user.id:
+        raise HTTPException(status_code=404, detail="棋譜が見つかりません。")
+    return branch_position(game, request)
+
+
+@router.post("/{game_id}/branch-analysis", response_model=BranchAnalysis)
+def analyze_branch_position(
+    game_id: int,
+    request: BranchPositionRequest,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> BranchAnalysis:
+    game = db.get(GameModel, game_id)
+    if game is None or game.user_id != user.id:
+        raise HTTPException(status_code=404, detail="棋譜が見つかりません。")
+    submission = db.scalar(select(CommentSubmission).where(CommentSubmission.game_id == game_id))
+    submitted = submission is not None and submission.submitted_at is not None
+    test_user = bool(settings.ai_access_test_user_email) and user.email.lower() == settings.ai_access_test_user_email
+    if not has_ai_access(db, user.id) or not (submitted or test_user):
+        raise HTTPException(status_code=403, detail="分岐解析はコメント提出後、AI解説プランで利用できます。")
+    if request.move_number > game.move_count:
+        raise HTTPException(status_code=422, detail="分岐開始局面が棋譜の手数を超えています。")
+    board = branch_board(game, request)
+    engine = create_engine_adapter()
+    try:
+        result = engine.analyze(board.sfen())
+    except (RuntimeError, TimeoutError, OSError):
+        raise HTTPException(status_code=503, detail="解析エンジンが応答しませんでした。時間をおいて再度お試しください。") from None
+    finally:
+        close = getattr(engine, "close", None)
+        if close is not None:
+            close()
+    evaluation = normalize_evaluation(result.score_side_to_move, side_to_move=board.turn, user_side=game.user_side)
+    mate_in = normalize_mate(result.mate_in, side_to_move=board.turn, user_side=game.user_side)
+    variations = []
+    for item in (result.variations or [result])[:5]:
+        variations.append({
+            "evaluation": normalize_evaluation(item.score_side_to_move, side_to_move=board.turn, user_side=game.user_side),
+            "mate_in": normalize_mate(item.mate_in, side_to_move=board.turn, user_side=game.user_side),
+            "principal_variation": japanese_variation(board, item.principal_variation),
+        })
+    return BranchAnalysis(
+        evaluation=evaluation, mate_in=mate_in, win_rate=win_rate(evaluation or 0, mate_in),
+        engine_name=engine.name, engine_version=engine.version,
+        evaluation_function=getattr(engine, "evaluation_name", None), variations=variations,
+    )
+
+
+@router.get("/{game_id}/branches", response_model=list[SavedBranch])
+def list_game_branches(
+    game_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> list[GameBranch]:
+    game = db.get(GameModel, game_id)
+    if game is None or game.user_id != user.id:
+        raise HTTPException(status_code=404, detail="棋譜が見つかりません。")
+    return list(db.scalars(select(GameBranch).where(GameBranch.game_id == game_id, GameBranch.user_id == user.id).order_by(GameBranch.id)))
+
+
+@router.post("/{game_id}/branches", response_model=SavedBranch, status_code=status.HTTP_201_CREATED)
+def save_game_branch(
+    game_id: int,
+    request: BranchSaveRequest,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> GameBranch:
+    game = db.get(GameModel, game_id)
+    if game is None or game.user_id != user.id:
+        raise HTTPException(status_code=404, detail="棋譜が見つかりません。")
+    if not request.moves:
+        raise HTTPException(status_code=422, detail="1手以上指してから分岐を保存してください。")
+    if request.move_number > game.move_count:
+        raise HTTPException(status_code=422, detail="分岐開始局面が棋譜の手数を超えています。")
+    board = branch_board(game, BranchPositionRequest(move_number=request.move_number, moves=[]))
+    japanese_moves: list[str] = []
+    for move_text in request.moves:
+        move = shogi.Move.from_usi(move_text)
+        if move not in board.legal_moves:
+            raise HTTPException(status_code=422, detail="分岐手順に現在局面では指せない手が含まれています。")
+        japanese_moves.append(KifExporter.kif_move_from(move_text, board))
+        board.push(move)
+    count = len(list(db.scalars(select(GameBranch.id).where(GameBranch.game_id == game_id))))
+    branch = GameBranch(game_id=game_id, user_id=user.id, name=f"分岐{count + 1}", base_move_number=request.move_number, usi_moves=request.moves, japanese_moves=japanese_moves)
+    db.add(branch)
+    db.commit()
+    db.refresh(branch)
+    return branch
+
+@router.post("/{game_id}/comment-position/{move_number}", response_model=CriticalPosition, status_code=status.HTTP_201_CREATED)
+def create_comment_position(
+    game_id: int,
+    move_number: int,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> CriticalPosition:
+    game = db.get(GameModel, game_id)
+    if game is None or game.user_id != user.id:
+        raise HTTPException(status_code=404, detail="棋譜が見つかりません。")
+    if move_number < 1 or move_number > game.move_count:
+        raise HTTPException(status_code=422, detail="コメントする局面を1手目以降から選択してください。")
+    submission = db.scalar(select(CommentSubmission).where(CommentSubmission.game_id == game_id))
+    if submission is not None and submission.submitted_at is not None:
+        raise HTTPException(status_code=409, detail="提出済みコメントには局面を追加できません。")
+    existing = db.scalar(select(CriticalPositionModel).where(
+        CriticalPositionModel.game_id == game_id, CriticalPositionModel.move_number == move_number
+    ))
+    if existing is None:
+        current = db.scalar(select(AnalysisResult).where(
+            AnalysisResult.game_id == game_id, AnalysisResult.move_number == move_number
+        ))
+        previous = db.scalar(select(AnalysisResult).where(
+            AnalysisResult.game_id == game_id, AnalysisResult.move_number == move_number - 1
+        )) if move_number > 1 else None
+        after = current.evaluation_user if current and current.evaluation_user is not None else 0
+        before = previous.evaluation_user if previous and previous.evaluation_user is not None else 0
+        existing = CriticalPositionModel(
+            game_id=game_id, move_number=move_number,
+            japanese_move=japanese_move_at(game.initial_sfen, game.usi_moves, move_number),
+            evaluation_before=before, evaluation_after=after, evaluation_delta=after - before,
+            selection_reason="ユーザーがコメント対象として指定",
+            extraction_metadata={"source": "user_selected"}, required=False,
+        )
+        db.add(existing)
+        db.commit()
+        db.refresh(existing)
+    submitted = submission is not None and submission.submitted_at is not None
+    return CriticalPosition(
+        id=existing.id, game_id=existing.game_id, move_number=existing.move_number,
+        japanese_move=existing.japanese_move, required=existing.required,
+        evaluation_before=existing.evaluation_before if submitted else None,
+        evaluation_after=existing.evaluation_after if submitted else None,
+        evaluation_delta=existing.evaluation_delta if submitted else None,
+        selection_reason=None, principal_variation=None, engine_explanation_visible=submitted,
+    )
+
+
 @router.get("/{game_id}/critical-positions", response_model=list[CriticalPosition])
 def list_critical_positions(
     game_id: int,
@@ -358,7 +590,7 @@ def list_critical_positions(
             evaluation_delta=item.evaluation_delta if submitted else None,
             selection_reason=item.selection_reason if ai_visible else None,
             principal_variation=(
-                analyses[item.move_number].principal_variation
+                japanese_variation_at(game.initial_sfen, game.usi_moves, item.move_number, analyses[item.move_number].principal_variation)
                 if item.move_number in analyses
                 else []
             ) if ai_visible else None,

@@ -26,6 +26,55 @@ class GameVisibilityUpdate(BaseModel):
     is_public: bool
 
 
+class BranchPositionRequest(BaseModel):
+    move_number: int = Field(ge=0)
+    moves: list[str] = Field(default_factory=list, max_length=200)
+
+
+class BranchLegalMove(BaseModel):
+    usi: str
+    from_square: str | None
+    to_square: str
+    drop_piece: str | None = None
+    promote: bool = False
+    japanese_move: str
+
+
+class BranchPosition(BaseModel):
+    board: dict[str, object]
+    turn: str
+    moves: list[str]
+    japanese_moves: list[str]
+    legal_moves: list[BranchLegalMove]
+    game_over: bool
+
+
+class BranchAnalysis(BaseModel):
+    evaluation: int | None
+    mate_in: int | None
+    win_rate: int
+    engine_name: str
+    engine_version: str
+    evaluation_function: str | None = None
+    variations: list[dict[str, object]]
+
+
+class BranchSaveRequest(BranchPositionRequest):
+    pass
+
+
+class SavedBranch(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    game_id: int
+    name: str
+    base_move_number: int
+    usi_moves: list[str]
+    japanese_moves: list[str]
+    created_at: datetime
+    updated_at: datetime
+
+
 class CriticalPosition(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -110,4 +159,4 @@ class RewardSummary(BaseModel):
     fixed_yen: int = Field(ge=0)
     payout_available_yen: int = Field(ge=0)
     approved_games: int = Field(ge=0)
-    minimum_payout_yen: int = 3000
+    minimum_payout_yen: int = 10000

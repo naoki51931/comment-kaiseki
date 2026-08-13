@@ -1,9 +1,10 @@
 from collections.abc import Generator
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -11,7 +12,7 @@ from app.config import settings
 from app.api.dependencies import get_current_user
 from app.database import Base, get_db
 from app.main import app
-from app.models import ProfessionalGameFingerprint, User
+from app.models import AnalysisStatus, CommentSubmission, Game, ProfessionalGameFingerprint, User
 from app.services.kif import parse_game_file
 
 
@@ -162,6 +163,68 @@ def test_playback_returns_board_frames(client: TestClient) -> None:
     assert playback["frames"][1]["evaluation"] is None
 
 
+def test_branch_position_returns_legal_moves_and_applies_capture(client: TestClient) -> None:
+    game_id = upload(client).json()["id"]
+    start = client.post(f"/api/games/{game_id}/branch-position", json={"move_number": 0, "moves": []})
+    assert start.status_code == 200
+    assert any(move["usi"] == "7g7f" for move in start.json()["legal_moves"])
+
+    advanced = client.post(
+        f"/api/games/{game_id}/branch-position",
+        json={"move_number": 0, "moves": ["7g7f", "3c3d", "7f7e", "3d3e", "7e7d", "3e3f", "7d7c+"]},
+    )
+    assert advanced.status_code == 200
+    assert advanced.json()["board"]["squares"][2][2]["symbol"] == "と"
+    assert advanced.json()["board"]["hands"]["SENTE"][0]["symbol"] == "歩"
+
+
+def test_branch_position_rejects_illegal_move(client: TestClient) -> None:
+    game_id = upload(client).json()["id"]
+    response = client.post(f"/api/games/{game_id}/branch-position", json={"move_number": 0, "moves": ["7g7e"]})
+    assert response.status_code == 422
+
+
+def test_branch_position_can_drop_piece_from_hand(client: TestClient) -> None:
+    content = b"sfen 4k4/9/9/9/9/9/9/9/4K4 b P 1\nP*5e\n"
+    uploaded = upload(client, content=content, filename="drop.txt")
+    assert uploaded.status_code == 202, uploaded.text
+    game_id = uploaded.json()["id"]
+    position = client.post(f"/api/games/{game_id}/branch-position", json={"move_number": 0, "moves": []})
+    assert position.status_code == 200
+    drop = next(move for move in position.json()["legal_moves"] if move["usi"] == "P*5e")
+    assert drop["drop_piece"] == "P"
+    assert drop["from_square"] is None
+
+    dropped = client.post(f"/api/games/{game_id}/branch-position", json={"move_number": 0, "moves": ["P*5e"]})
+    assert dropped.status_code == 200
+    assert dropped.json()["board"]["squares"][4][4]["symbol"] == "歩"
+    assert dropped.json()["board"]["hands"]["SENTE"] == []
+
+
+def test_branch_can_be_saved_and_listed_as_branch_one(client: TestClient) -> None:
+    game_id = upload(client).json()["id"]
+    saved = client.post(f"/api/games/{game_id}/branches", json={"move_number": 0, "moves": ["7g7f", "3c3d"]})
+    assert saved.status_code == 201
+    assert saved.json()["name"] == "分岐1"
+    assert saved.json()["japanese_moves"] == ["７六歩(77)", "３四歩(33)"]
+
+    branches = client.get(f"/api/games/{game_id}/branches")
+    assert branches.status_code == 200
+    assert branches.json()[0]["name"] == "分岐1"
+    assert branches.json()[0]["usi_moves"] == ["7g7f", "3c3d"]
+
+
+def test_empty_branch_cannot_be_saved(client: TestClient) -> None:
+    game_id = upload(client).json()["id"]
+    assert client.post(f"/api/games/{game_id}/branches", json={"move_number": 0, "moves": []}).status_code == 422
+
+
+def test_branch_analysis_requires_ai_access(client: TestClient) -> None:
+    game_id = upload(client).json()["id"]
+    response = client.post(f"/api/games/{game_id}/branch-analysis", json={"move_number": 0, "moves": ["7g7f"]})
+    assert response.status_code == 403
+
+
 def test_owner_can_delete_game_and_stored_file(client: TestClient) -> None:
     created = upload(client)
     game_id = created.json()["id"]
@@ -254,3 +317,57 @@ def test_posting_terms_agreement_is_required(client: TestClient) -> None:
 def test_unknown_game_has_no_critical_positions(client: TestClient) -> None:
     response = client.get("/api/games/999/critical-positions")
     assert response.status_code == 404
+
+
+def test_owner_can_request_game_reanalysis(client: TestClient) -> None:
+    game_id = upload(client).json()["id"]
+    with client.app.state.testing_session() as db:
+        game = db.get(Game, game_id)
+        game.analysis_status = AnalysisStatus.COMMENT_REQUIRED.value
+        db.commit()
+
+    response = client.post(f"/api/games/{game_id}/reanalyze")
+
+    assert response.status_code == 202
+    assert response.json()["analysis_status"] == "QUEUED"
+    assert client.post(f"/api/games/{game_id}/reanalyze").status_code == 409
+
+
+def test_reanalysis_accepts_submitted_comments_without_deleting_them(client: TestClient) -> None:
+    game_id = upload(client).json()["id"]
+    with client.app.state.testing_session() as db:
+        game = db.get(Game, game_id)
+        game.analysis_status = AnalysisStatus.COMMENT_REQUIRED.value
+        db.add(CommentSubmission(game_id=game_id, user_id=game.user_id, submitted_at=datetime.now(timezone.utc)))
+        db.commit()
+
+    response = client.post(f"/api/games/{game_id}/reanalyze")
+
+    assert response.status_code == 202
+    with client.app.state.testing_session() as db:
+        submission = db.scalar(select(CommentSubmission).where(CommentSubmission.game_id == game_id))
+        assert submission is not None
+        assert submission.submitted_at is not None
+
+
+def test_owner_can_add_selected_comment_position(client: TestClient) -> None:
+    game_id = upload(client).json()["id"]
+    with client.app.state.testing_session() as db:
+        game = db.get(Game, game_id)
+        game.analysis_status = AnalysisStatus.COMMENT_REQUIRED.value
+        db.commit()
+
+    response = client.post(f"/api/games/{game_id}/comment-position/2")
+    duplicate = client.post(f"/api/games/{game_id}/comment-position/2")
+
+    assert response.status_code == 201
+    assert response.json()["move_number"] == 2
+    assert response.json()["japanese_move"] == "３四歩(33)"
+    assert response.json()["required"] is False
+    assert duplicate.status_code == 201
+    assert duplicate.json()["id"] == response.json()["id"]
+
+
+def test_start_position_cannot_be_added_as_comment_position(client: TestClient) -> None:
+    game_id = upload(client).json()["id"]
+    assert client.post(f"/api/games/{game_id}/comment-position/0").status_code == 422

@@ -118,7 +118,7 @@ def request_payout(
     )
     amount = sum(item.amount_yen for item in rewards)
     if amount < settings.minimum_payout_yen:
-        raise HTTPException(status_code=409, detail="振込可能額が最低金額に達していません。")
+        raise HTTPException(status_code=409, detail=f"振込可能額が最低金額の{settings.minimum_payout_yen:,}円に達していません。")
     payout = Payout(user_id=user.id, amount_yen=amount)
     db.add(payout)
     db.flush()

@@ -36,18 +36,18 @@ def create_access_token(user_id: int, is_admin: bool) -> str:
             "admin": is_admin,
             "type": "access",
             "iat": now,
-            "exp": now + timedelta(minutes=settings.access_token_minutes),
+            "exp": now + timedelta(hours=settings.login_session_hours),
         },
         settings.jwt_secret,
         algorithm="HS256",
     )
 
 
-def decode_access_token(token: str) -> int:
+def decode_access_token(token: str) -> tuple[int, bool]:
     payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
     if payload.get("type") != "access":
         raise jwt.InvalidTokenError("アクセストークンではありません。")
-    return int(payload["sub"])
+    return int(payload["sub"]), payload.get("admin") is True
 
 
 def new_opaque_token() -> str:

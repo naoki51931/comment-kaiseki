@@ -104,6 +104,8 @@ def save_draft(
 
     db.execute(delete(CommentAnswer).where(CommentAnswer.submission_id == submission.id))
     for answer in payload.answers:
+        if not answer.answer_text.strip():
+            continue
         db.add(
             CommentAnswer(
                 submission_id=submission.id,
@@ -141,16 +143,10 @@ def submit_comments(
         for item in answers
         if item.answer_text.strip()
     }
-    missing = [
-        {"critical_position_id": position_id, "question_number": question}
-        for position_id in sorted(required_ids)
-        for question in range(1, 4)
-        if (position_id, question) not in answered
-    ]
     if not required_ids:
         raise HTTPException(status_code=409, detail="重要局面の解析が完了していません。")
-    if missing:
-        raise HTTPException(status_code=422, detail={"message": "必須回答が不足しています。", "missing": missing})
+    if not answered:
+        raise HTTPException(status_code=422, detail="コメントを1つ以上入力してください。")
 
     now = datetime.now(timezone.utc)
     snapshot = {

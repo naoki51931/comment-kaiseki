@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.api.dependencies import require_admin
 from app.database import get_db
 from app.models import AnalysisResult, AuditLog, CommentSubmission, CriticalPosition, Game, Review, ReviewStatus, User
+from app.services.analysis import japanese_move_at, japanese_variation_at
 from app.services.rewards import grant_reward
 
 
@@ -28,6 +29,37 @@ class ReviewRequest(BaseModel):
     quality_tags: list[str] = Field(default_factory=list, max_length=20)
 
 
+def review_snapshot_for_display(snapshot: dict | None, game: Game | None) -> dict | None:
+    """古い提出スナップショットも日本語指し手・全3回答の形へ整える。"""
+    if snapshot is None:
+        return None
+    positions = [dict(position) for position in snapshot.get("positions", [])]
+    for position in positions:
+        if game is None:
+            continue
+        try:
+            position["move"] = japanese_move_at(
+                game.initial_sfen, game.usi_moves, int(position["move_number"])
+            )
+        except (KeyError, TypeError, ValueError):
+            pass
+
+    existing_answers = {
+        (answer.get("critical_position_id"), answer.get("question_number")): answer
+        for answer in snapshot.get("answers", [])
+    }
+    answers = []
+    for position in positions:
+        for question_number in range(1, 4):
+            answer = existing_answers.get((position.get("id"), question_number))
+            answers.append({
+                "critical_position_id": position.get("id"),
+                "question_number": question_number,
+                "answer_text": "" if answer is None else answer.get("answer_text", ""),
+            })
+    return {**snapshot, "positions": positions, "answers": answers}
+
+
 @router.get("/reviews")
 def list_reviews(
     db: Annotated[Session, Depends(get_db)],
@@ -40,6 +72,10 @@ def list_reviews(
             .order_by(CommentSubmission.submitted_at)
         )
     )
+    games = {
+        game.id: game
+        for game in db.scalars(select(Game).where(Game.id.in_([item.game_id for item in submissions])))
+    } if submissions else {}
     return [
         {
             "id": item.id,
@@ -47,7 +83,7 @@ def list_reviews(
             "user_id": item.user_id,
             "status": item.review_status,
             "submitted_at": item.submitted_at,
-            "snapshot": item.submitted_snapshot,
+            "snapshot": review_snapshot_for_display(item.submitted_snapshot, games.get(item.game_id)),
         }
         for item in submissions
     ]
@@ -78,7 +114,7 @@ def review_detail(
         "id": submission.id,
         "status": submission.review_status,
         "submitted_at": submission.submitted_at,
-        "snapshot": submission.submitted_snapshot,
+        "snapshot": review_snapshot_for_display(submission.submitted_snapshot, game),
         "game": {
             "id": game.id,
             "filename": game.original_filename,
@@ -93,7 +129,7 @@ def review_detail(
                 "evaluation_before": position.evaluation_before,
                 "evaluation_after": position.evaluation_after,
                 "selection_reason": position.selection_reason,
-                "principal_variation": analyses[position.move_number].principal_variation
+                "principal_variation": japanese_variation_at(game.initial_sfen, game.usi_moves, position.move_number, analyses[position.move_number].principal_variation)
                 if position.move_number in analyses else [],
             }
             for position in positions

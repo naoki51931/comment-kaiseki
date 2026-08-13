@@ -20,17 +20,18 @@ def get_current_user(
     if credentials is None:
         raise HTTPException(status_code=401, detail="ログインが必要です。")
     try:
-        user_id = decode_access_token(credentials.credentials)
+        user_id, admin_authenticated = decode_access_token(credentials.credentials)
     except (jwt.InvalidTokenError, ValueError):
         raise HTTPException(status_code=401, detail="アクセストークンが無効です。")
     user = db.get(User, user_id)
     if user is None or not user.email_verified:
         raise HTTPException(status_code=401, detail="ユーザーを確認できません。")
+    user._admin_authenticated = admin_authenticated
     return user
 
 
 def require_admin(user: Annotated[User, Depends(get_current_user)]) -> User:
-    if not user.is_admin:
+    if not user.is_admin or not getattr(user, "_admin_authenticated", False):
         raise HTTPException(status_code=403, detail="管理者権限が必要です。")
     if not user.mfa_enabled:
         raise HTTPException(status_code=403, detail="管理者はMFAの設定が必要です。")
