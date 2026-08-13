@@ -15,10 +15,15 @@ class Game(BaseModel):
     gote_name: str | None = None
     played_at: date
     user_side: str
+    is_public: bool = False
     move_count: int | None = None
     analysis_status: AnalysisStatus
     analysis_error: str | None = None
     critical_position_count: int = 0
+
+
+class GameVisibilityUpdate(BaseModel):
+    is_public: bool
 
 
 class CriticalPosition(BaseModel):

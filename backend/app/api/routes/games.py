@@ -15,10 +15,11 @@ from app.models import (
     AnalysisJobOutbox, AnalysisResult, AnalysisStatus, CommentAnswer, CommentSubmission,
     CriticalPosition as CriticalPositionModel, Game as GameModel, Review, RewardLedger, User,
 )
-from app.schemas import CriticalPosition, Game
+from app.schemas import CriticalPosition, Game, GameVisibilityUpdate
 from app.services.analysis import japanese_move_at
 from shogi.KIF import Exporter as KifExporter
 from app.services.kif import KifValidationError, parse_game_file, parse_game_text
+from app.services.professional_games import is_professional_game
 from app.services.subscriptions import has_ai_access
 from app.services.storage import MalwareDetectedError, remove_private_file, save_private_file
 from app.tasks import dispatch_analysis_outbox
@@ -85,8 +86,10 @@ async def create_game(
     played_at: Annotated[date, Form()],
     user_side: Annotated[str, Form(pattern="^(SENTE|GOTE)$")],
     ownership_confirmed: Annotated[bool, Form()],
+    posting_terms_agreed: Annotated[bool, Form()],
     db: Annotated[Session, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
+    is_public: Annotated[bool, Form()] = False,
     game_file: Annotated[UploadFile | None, File()] = None,
     game_text: Annotated[str | None, Form()] = None,
 ) -> GameModel:
@@ -94,6 +97,11 @@ async def create_game(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="本人対局・未投稿であることへの同意が必要です。",
+        )
+    if not posting_terms_agreed:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="棋譜投稿規約への同意が必要です。プロ公式戦棋譜は投稿できません。",
         )
 
     has_file = game_file is not None and bool(game_file.filename)
@@ -118,6 +126,11 @@ async def create_game(
     except KifValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    if is_professional_game(db, parsed.normalized_hash):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="プロ公式戦と一致する棋譜は投稿できません。ご本人が対局した棋譜だけを投稿してください。",
+        )
     duplicate = db.scalar(select(GameModel.id).where(GameModel.normalized_hash == parsed.normalized_hash))
     if duplicate is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="同じ指し手列の棋譜は投稿済みです。")
@@ -141,6 +154,7 @@ async def create_game(
             source_encoding=parsed.encoding,
             played_at=played_at,
             user_side=user_side,
+            is_public=is_public,
             initial_sfen=parsed.initial_sfen,
             usi_moves=parsed.usi_moves,
             move_count=len(parsed.usi_moves),
@@ -198,6 +212,22 @@ def delete_game(
         db.rollback()
         raise
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.patch("/{game_id}/visibility", response_model=Game)
+def update_game_visibility(
+    game_id: int,
+    payload: GameVisibilityUpdate,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> GameModel:
+    game = db.get(GameModel, game_id)
+    if game is None or game.user_id != user.id:
+        raise HTTPException(status_code=404, detail="棋譜が見つかりません。")
+    game.is_public = payload.is_public
+    db.commit()
+    db.refresh(game)
+    return game
 
 @router.get("/{game_id}/playback")
 def game_playback(
