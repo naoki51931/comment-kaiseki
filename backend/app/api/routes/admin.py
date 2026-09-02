@@ -2,14 +2,18 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import require_admin
 from app.database import get_db
-from app.models import AnalysisResult, AuditLog, CommentSubmission, CriticalPosition, Game, Review, ReviewStatus, User
+from app.models import (
+    AccessCodeRedemption, AiAccessSubscription, AnalysisResult, AuditLog,
+    CommentSubmission, CriticalPosition, Game, Review, ReviewStatus, User,
+)
 from app.services.analysis import japanese_move_at, japanese_variation_at
 from app.services.rewards import grant_reward
+from app.services.subscriptions import has_ai_access
 
 
 router = APIRouter()
@@ -27,6 +31,21 @@ class ReviewRequest(BaseModel):
     status: ReviewStatus
     reason: str = Field(min_length=1, max_length=4000)
     quality_tags: list[str] = Field(default_factory=list, max_length=20)
+
+
+@router.get("/users")
+def list_users(db: Annotated[Session, Depends(get_db)], _: Annotated[User, Depends(require_admin)]) -> list[dict[str, object]]:
+    users = list(db.scalars(select(User).order_by(User.created_at.desc(), User.id.desc())))
+    subscriptions = {item.user_id: item for item in db.scalars(select(AiAccessSubscription))}
+    permanent_user_ids = set(db.scalars(select(AccessCodeRedemption.user_id)))
+    game_counts = dict(db.execute(select(Game.user_id, func.count(Game.id)).group_by(Game.user_id)).all())
+    return [{"id": user.id, "email": user.email, "email_verified": user.email_verified, "is_admin": user.is_admin, "created_at": user.created_at, "game_count": game_counts.get(user.id, 0), "ai_access_active": has_ai_access(db, user.id), "permanent_access": user.id in permanent_user_ids, "subscription_status": subscriptions[user.id].status if user.id in subscriptions else "NONE", "current_period_end": subscriptions[user.id].current_period_end if user.id in subscriptions else None} for user in users]
+
+
+@router.get("/games")
+def list_games(db: Annotated[Session, Depends(get_db)], _: Annotated[User, Depends(require_admin)]) -> list[dict[str, object]]:
+    rows = db.execute(select(Game, User.email).join(User, User.id == Game.user_id).order_by(Game.created_at.desc(), Game.id.desc())).all()
+    return [{"id": game.id, "user_id": game.user_id, "user_email": email, "original_filename": game.original_filename, "event_name": game.event_name, "played_at": game.played_at, "user_side": game.user_side, "is_public": game.is_public, "move_count": game.move_count, "analysis_status": game.analysis_status, "critical_position_count": game.critical_position_count, "created_at": game.created_at} for game, email in rows]
 
 
 def review_snapshot_for_display(snapshot: dict | None, game: Game | None) -> dict | None:

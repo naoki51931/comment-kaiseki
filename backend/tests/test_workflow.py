@@ -11,6 +11,8 @@ from app.config import settings
 from app.database import Base, get_db
 from app.main import app
 from app.models import (
+    AccessCode,
+    AccessCodeRedemption,
     AiAccessSubscription,
     AiComment,
     AiCommentFeedback,
@@ -104,6 +106,21 @@ def test_comment_privacy_submission_review_and_reward() -> None:
         assert test_playback["frames"][1]["principal_variation"] is None
         settings.ai_access_test_user_email = previous_test_email
 
+        with sessions() as permanent_db:
+            code = AccessCode(code="workflow-permanent", is_active=True)
+            permanent_db.add(code)
+            permanent_db.flush()
+            permanent_db.add(AccessCodeRedemption(access_code_id=code.id, user_id=owner.id))
+            permanent_db.commit()
+        permanent_position = client.get(f"/api/games/{game.id}/critical-positions").json()[0]
+        assert permanent_position["selection_reason"] == "評価値が500点変化"
+        assert permanent_position["principal_variation"] == ["３四歩(33)", "２六歩(27)"]
+        permanent_playback = client.get(f"/api/games/{game.id}/playback").json()
+        assert permanent_playback["frames"][1]["principal_variation"] == ["３四歩(33)", "２六歩(27)"]
+        with sessions() as permanent_db:
+            permanent_db.query(AccessCodeRedemption).filter_by(user_id=owner.id).delete()
+            permanent_db.commit()
+
         draft = client.get(f"/api/games/{game.id}/comments").json()
         assert draft["review_status"] == "NOT_SUBMITTED"
         incomplete = {
@@ -166,6 +183,19 @@ def test_comment_privacy_submission_review_and_reward() -> None:
         assert visible_playback["frames"][1]["principal_variation"] == ["３四歩(33)", "２六歩(27)"]
 
         app.dependency_overrides[require_admin] = lambda: admin
+        admin_users = client.get("/api/admin/users")
+        assert admin_users.status_code == 200
+        owner_row = next(item for item in admin_users.json() if item["id"] == owner.id)
+        assert owner_row["game_count"] == 1
+        assert owner_row["ai_access_active"] is True
+        assert owner_row["permanent_access"] is False
+        assert owner_row["subscription_status"] == "active"
+        admin_games = client.get("/api/admin/games")
+        assert admin_games.status_code == 200
+        assert admin_games.json()[0]["user_email"] == "owner@example.com"
+        assert admin_games.json()[0]["original_filename"] == "workflow.kif"
+        assert "storage_path" not in admin_games.json()[0]
+
         reviews = client.get("/api/admin/reviews").json()
         assert reviews[0]["snapshot"]["positions"][0]["move"] == "７六歩(77)"
         assert len(reviews[0]["snapshot"]["answers"]) == 3
@@ -187,7 +217,7 @@ def test_comment_privacy_submission_review_and_reward() -> None:
         submission = db.scalar(select(CommentSubmission))
         reward = db.scalar(select(RewardLedger))
         assert submission.review_status == ReviewStatus.APPROVED.value
-        assert reward.amount_yen == 300
+        assert reward.amount_yen == settings.reward_per_game_yen
         assert reward.status == "FIXED"
     app.dependency_overrides.clear()
     Base.metadata.drop_all(engine)
