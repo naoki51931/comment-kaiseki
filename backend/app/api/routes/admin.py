@@ -9,14 +9,31 @@ from app.api.dependencies import require_admin
 from app.database import get_db
 from app.models import (
     AccessCodeRedemption, AiAccessSubscription, AnalysisResult, AuditLog,
-    CommentSubmission, CriticalPosition, Game, Review, ReviewStatus, User,
+    CommentSubmission, CriticalPosition, Game, GameBranch, Review, ReviewStatus, User,
 )
+from app.schemas import BranchPositionRequest
+from app.api.routes.games import branch_position, game_playback
 from app.services.analysis import japanese_move_at, japanese_variation_at
 from app.services.rewards import grant_reward
 from app.services.subscriptions import has_ai_access
 
 
 router = APIRouter()
+PRO_LEVEL_MATCH_RATE = 70
+PRO_LEVEL_MIN_MOVES = 20
+
+
+def professional_level_match(game: Game, analyses: list[AnalysisResult]) -> tuple[int | None, int]:
+    matches = 0
+    count = 0
+    for item in analyses:
+        is_user_move = (item.move_number % 2 == 1) == (game.user_side == "SENTE")
+        candidates = item.pre_move_variations or []
+        if not is_user_move or item.move_number > len(game.usi_moves) or not candidates or not candidates[0].get("principal_variation"):
+            continue
+        count += 1
+        matches += int(game.usi_moves[item.move_number - 1] == candidates[0]["principal_variation"][0])
+    return (round(matches / count * 100), count) if count else (None, 0)
 ALLOWED_TRANSITIONS = {
     ReviewStatus.UNDER_REVIEW.value: {
         ReviewStatus.APPROVED.value,
@@ -45,7 +62,34 @@ def list_users(db: Annotated[Session, Depends(get_db)], _: Annotated[User, Depen
 @router.get("/games")
 def list_games(db: Annotated[Session, Depends(get_db)], _: Annotated[User, Depends(require_admin)]) -> list[dict[str, object]]:
     rows = db.execute(select(Game, User.email).join(User, User.id == Game.user_id).order_by(Game.created_at.desc(), Game.id.desc())).all()
-    return [{"id": game.id, "user_id": game.user_id, "user_email": email, "original_filename": game.original_filename, "event_name": game.event_name, "played_at": game.played_at, "user_side": game.user_side, "is_public": game.is_public, "move_count": game.move_count, "analysis_status": game.analysis_status, "critical_position_count": game.critical_position_count, "created_at": game.created_at} for game, email in rows]
+    analyses_by_game: dict[int, list[AnalysisResult]] = {}
+    for analysis in db.scalars(select(AnalysisResult).order_by(AnalysisResult.game_id, AnalysisResult.move_number)):
+        analyses_by_game.setdefault(analysis.game_id, []).append(analysis)
+    result = []
+    for game, email in rows:
+        match_rate, analyzed_moves = professional_level_match(game, analyses_by_game.get(game.id, []))
+        result.append({"id": game.id, "user_id": game.user_id, "user_email": email, "original_filename": game.original_filename, "event_name": game.event_name, "sente_name": game.sente_name, "gote_name": game.gote_name, "played_at": game.played_at, "user_side": game.user_side, "is_public": game.is_public, "move_count": game.move_count, "analysis_status": game.analysis_status, "critical_position_count": game.critical_position_count, "created_at": game.created_at, "best_move_match_rate": match_rate, "match_rate_analyzed_moves": analyzed_moves, "professional_level_deletion_candidate": analyzed_moves >= PRO_LEVEL_MIN_MOVES and match_rate is not None and match_rate >= PRO_LEVEL_MATCH_RATE})
+    return result
+
+
+@router.get("/games/{game_id}/playback")
+def admin_game_playback(game_id: int, db: Annotated[Session, Depends(get_db)], _: Annotated[User, Depends(require_admin)]) -> dict[str, object]:
+    game = db.get(Game, game_id)
+    if game is None:
+        raise HTTPException(status_code=404, detail="棋譜が見つかりません。")
+    owner = db.get(User, game.user_id)
+    if owner is None:
+        raise HTTPException(status_code=404, detail="投稿ユーザーが見つかりません。")
+    return game_playback(game_id=game_id, db=db, user=owner)
+
+
+@router.get("/games/{game_id}/branches")
+def admin_game_branches(game_id: int, db: Annotated[Session, Depends(get_db)], _: Annotated[User, Depends(require_admin)]) -> list[dict[str, object]]:
+    game = db.get(Game, game_id)
+    if game is None:
+        raise HTTPException(status_code=404, detail="棋譜が見つかりません。")
+    branches = list(db.scalars(select(GameBranch).where(GameBranch.game_id == game_id).order_by(GameBranch.id)))
+    return [{"id": branch.id, "name": branch.name, "base_move_number": branch.base_move_number, "usi_moves": branch.usi_moves, "japanese_moves": branch.japanese_moves, "board": branch_position(game, BranchPositionRequest(move_number=branch.base_move_number, moves=branch.usi_moves)).board} for branch in branches]
 
 
 def review_snapshot_for_display(snapshot: dict | None, game: Game | None) -> dict | None:

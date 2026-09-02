@@ -413,3 +413,21 @@ button:disabled { opacity: .55; cursor: wait; }
 .admin-plan.permanent { background: #f4dfaa; color: #684d24; }
 .admin-plan.active { background: #dcebd8; color: #29452e; }
 .admin-plan.inactive { background: #ebe7e0; color: #6c6256; }
+
+.admin-table tr.selected td { background: #f7f0df; }
+.admin-game-link { display: grid; gap: 4px; width: 100%; padding: 0; background: transparent; color: #263e35; text-align: left; border: 0; }
+.admin-game-link:hover, .admin-game-link:focus-visible { color: #9a3d2f; text-decoration: underline; }
+.admin-game-detail { margin-top: 28px; padding-top: 24px; border-top: 2px solid #d7cdbc; }
+.admin-playback-layout { display: grid; grid-template-columns: minmax(360px, 1fr) minmax(280px, .8fr); gap: 28px; align-items: start; }
+.admin-board { max-width: 560px; }
+.admin-playback-layout aside { display: grid; gap: 12px; }
+.admin-branch-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.admin-branch-list button.active { background: #9a3d2f; }
+.admin-branch-detail { display: grid; gap: 12px; margin-top: 8px; padding-top: 18px; border-top: 1px solid #d7cdbc; }
+.admin-branch-detail .admin-board { max-width: 440px; }
+@media (max-width: 900px) { .admin-playback-layout { grid-template-columns: 1fr; } }
+
+.admin-delete-candidate { display: inline-block; margin-top: 6px; padding: 4px 8px; background: #9a3d2f; color: white; font-size: 12px; font-weight: 700; text-decoration: none; }
+.admin-professional-warning { border: 2px solid #9a3d2f; }
+
+.admin-match-pending { color: #81766a; }

@@ -1,5 +1,6 @@
 from collections.abc import Generator
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
@@ -7,6 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.api.dependencies import get_current_user, require_admin
+from app.api.routes.admin import professional_level_match
 from app.config import settings
 from app.database import Base, get_db
 from app.main import app
@@ -20,10 +22,20 @@ from app.models import (
     CommentSubmission,
     CriticalPosition,
     Game,
+    GameBranch,
     RewardLedger,
     ReviewStatus,
     User,
 )
+
+
+def test_professional_level_match_requires_twenty_moves() -> None:
+    moves = ["7g7f" if number % 2 else "3c3d" for number in range(1, 41)]
+    game = SimpleNamespace(user_side="SENTE", usi_moves=moves)
+    analyses = [SimpleNamespace(move_number=number, pre_move_variations=[{"principal_variation": [moves[number - 1]]}]) for number in range(1, 41)]
+    rate, count = professional_level_match(game, analyses)
+    assert rate == 100
+    assert count == 20
 
 
 def test_comment_privacy_submission_review_and_reward() -> None:
@@ -74,11 +86,13 @@ def test_comment_privacy_submission_review_and_reward() -> None:
             evaluation_user=-500,
             win_rate_user=30,
             principal_variation=["3c3d", "2g2f"],
+            pre_move_variations=[{"principal_variation": ["7g7f"]}],
             is_mate=False,
             engine_name="test",
             engine_version="1",
             search_conditions={"nodes": 100},
         ))
+        db.add(GameBranch(game_id=game.id, user_id=owner.id, name="分岐1", base_move_number=0, usi_moves=["7g7f"], japanese_moves=["７六歩(77)"]))
         db.commit()
         for item in (owner, admin, game, position):
             db.refresh(item)
@@ -194,7 +208,17 @@ def test_comment_privacy_submission_review_and_reward() -> None:
         assert admin_games.status_code == 200
         assert admin_games.json()[0]["user_email"] == "owner@example.com"
         assert admin_games.json()[0]["original_filename"] == "workflow.kif"
+        assert admin_games.json()[0]["best_move_match_rate"] == 100
+        assert admin_games.json()[0]["match_rate_analyzed_moves"] == 1
+        assert admin_games.json()[0]["professional_level_deletion_candidate"] is False
         assert "storage_path" not in admin_games.json()[0]
+        admin_playback = client.get(f"/api/admin/games/{game.id}/playback")
+        assert admin_playback.status_code == 200
+        assert admin_playback.json()["frames"][1]["japanese_move"] == "７六歩(77)"
+        admin_branches = client.get(f"/api/admin/games/{game.id}/branches")
+        assert admin_branches.status_code == 200
+        assert admin_branches.json()[0]["japanese_moves"] == ["７六歩(77)"]
+        assert admin_branches.json()[0]["board"]["turn"] == "GOTE"
 
         reviews = client.get("/api/admin/reviews").json()
         assert reviews[0]["snapshot"]["positions"][0]["move"] == "７六歩(77)"
