@@ -1,0 +1,9 @@
+User-agent: *
+Allow: /
+Disallow: /dashboard
+Disallow: /code
+Disallow: /games/
+Disallow: /login
+Disallow: /reset-password
+
+Sitemap: https://kifu-comment-lab.com/sitemap.xml
