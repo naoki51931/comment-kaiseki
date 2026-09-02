@@ -9,8 +9,9 @@ import stripe
 from app.api.dependencies import get_current_user
 from app.config import settings
 from app.database import get_db
-from app.models import AiAccessSubscription, User
-from app.services.subscriptions import ACTIVE_STATUSES, has_ai_access, unix_datetime
+from app.models import AccessCode, AccessCodeRedemption, AiAccessSubscription, AuditLog, User
+from app.services.subscriptions import ACTIVE_STATUSES, has_ai_access, has_permanent_access, unix_datetime
+from app.schemas import AccessCodeRedeemRequest, AccessCodeRedeemResponse
 
 
 router = APIRouter()
@@ -28,14 +29,49 @@ def subscription_status(
     user: Annotated[User, Depends(get_current_user)],
 ) -> dict[str, object]:
     subscription = db.scalar(select(AiAccessSubscription).where(AiAccessSubscription.user_id == user.id))
+    permanent_access = has_permanent_access(db, user.id)
     return {
         "active": has_ai_access(db, user.id),
-        "status": subscription.status if subscription else "NONE",
+        "permanent_access": permanent_access,
+        "status": "PERMANENT" if permanent_access else subscription.status if subscription else "NONE",
         "current_period_end": subscription.current_period_end if subscription else None,
         "monthly_price_yen": settings.ai_access_monthly_price_yen,
         "trial_days": settings.ai_access_trial_days,
+        "trial_available": subscription is None or subscription.stripe_subscription_id is None,
         "test_toggle_available": bool(settings.ai_access_test_user_email) and user.email.lower() == settings.ai_access_test_user_email,
     }
+
+
+@router.post("/redeem-code", response_model=AccessCodeRedeemResponse)
+def redeem_access_code(
+    payload: AccessCodeRedeemRequest,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> AccessCodeRedeemResponse:
+    existing = db.scalar(
+        select(AccessCodeRedemption).where(AccessCodeRedemption.user_id == user.id)
+    )
+    if existing is not None:
+        return AccessCodeRedeemResponse(
+            permanent_access=True, message="永久無料プランはすでに有効です。"
+        )
+    access_code = db.scalar(
+        select(AccessCode).where(
+            AccessCode.code == payload.code, AccessCode.is_active.is_(True)
+        )
+    )
+    if access_code is None:
+        raise HTTPException(status_code=422, detail="コードが正しくないか、現在利用できません。")
+    db.add(AccessCodeRedemption(access_code_id=access_code.id, user_id=user.id))
+    db.add(AuditLog(
+        actor_user_id=user.id, action="ACCESS_CODE_REDEEMED",
+        target_type="access_code", target_id=str(access_code.id),
+        details={"permanent_access": True},
+    ))
+    db.commit()
+    return AccessCodeRedeemResponse(
+        permanent_access=True, message="永久無料プランが有効になりました。"
+    )
 
 
 @router.post("/test-toggle")
@@ -65,6 +101,7 @@ def create_checkout(
 ) -> dict[str, str]:
     stripe_ready()
     subscription = db.scalar(select(AiAccessSubscription).where(AiAccessSubscription.user_id == user.id))
+    trial_available = subscription is None or subscription.stripe_subscription_id is None
     if has_ai_access(db, user.id):
         raise HTTPException(status_code=409, detail="AI解説プランは契約済みです。")
     base_url = settings.public_base_url or "http://localhost"
@@ -76,7 +113,7 @@ def create_checkout(
             metadata={"user_id": str(user.id), "product": "ai_comment_access"},
             subscription_data={
                 "metadata": {"user_id": str(user.id), "product": "ai_comment_access"},
-                "trial_period_days": settings.ai_access_trial_days,
+                **({"trial_period_days": settings.ai_access_trial_days} if trial_available else {}),
             },
             line_items=[{
                 "price_data": {
@@ -153,7 +190,7 @@ async def stripe_webhook(request: Request, db: Annotated[Session, Depends(get_db
     if event_type == "checkout.session.completed":
         if obj.get("payment_status") not in {"paid", "no_payment_required"}:
             return
-        if obj.get("amount_total") != settings.ai_access_monthly_price_yen or obj.get("currency") != "jpy":
+        if obj.get("amount_total") not in {0, settings.ai_access_monthly_price_yen} or obj.get("currency") != "jpy":
             raise HTTPException(status_code=400, detail="決済金額または通貨が一致しません。")
         subscription_id = obj.get("subscription")
         if subscription_id:

@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models import AnalysisStatus, ReviewStatus
 
@@ -130,6 +130,23 @@ class AiCommentView(BaseModel):
     updated_at: datetime
 
 
+class AccessCodeRedeemRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=100)
+
+    @field_validator("code")
+    @classmethod
+    def normalize_code(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("コードを入力してください。")
+        return normalized
+
+
+class AccessCodeRedeemResponse(BaseModel):
+    permanent_access: bool
+    message: str
+
+
 class SearchResult(BaseModel):
     source_type: str
     source_id: int
@@ -155,6 +172,8 @@ class SubmitResponse(BaseModel):
 
 
 class RewardSummary(BaseModel):
+    rewards_enabled: bool = True
+    reward_per_game_yen: int = Field(ge=0)
     pending_yen: int = Field(ge=0)
     fixed_yen: int = Field(ge=0)
     payout_available_yen: int = Field(ge=0)

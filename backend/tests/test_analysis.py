@@ -65,13 +65,13 @@ def test_yaneuraou_parser_uses_latest_score_and_pv() -> None:
 
 
 
-def test_yaneuraou_parser_reads_five_variations_and_limits_each_to_five_moves() -> None:
+def test_yaneuraou_parser_reads_five_variations_and_keeps_all_moves() -> None:
     result = YaneuraOuEngine._parse_info([
         f"info depth 12 multipv {index} score cp {100 - index} pv 7g7f 3c3d 2g2f 8c8d 2f2e 8d8e"
         for index in range(1, 6)
     ])
     assert len(result.variations or []) == 5
-    assert all(len(item.principal_variation) == 5 for item in result.variations or [])
+    assert all(len(item.principal_variation) == 6 for item in result.variations or [])
     assert (result.variations or [])[0].score_side_to_move == 99
 
 

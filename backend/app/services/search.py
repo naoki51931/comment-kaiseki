@@ -13,7 +13,9 @@ from app.config import settings
 from app.models import AiComment, CommentAnswer, CommentSubmission, CriticalPosition, Game
 
 logger = logging.getLogger(__name__)
-COLLECTION = "KifuSearchDocument"
+# 旧コレクションはauto-schemaにより日本語を分割できないword設定で
+# 作成済みのため、破壊的削除を避けて日本語設定の新コレクションへ移行する。
+COLLECTION = "KifuSearchDocumentV3"
 
 
 @dataclass(frozen=True)
@@ -29,7 +31,7 @@ class SearchDocument:
 
     @property
     def object_id(self) -> str:
-        return str(uuid5(NAMESPACE_URL, f"kifu-comment:{self.source_type}:{self.source_id}"))
+        return str(uuid5(NAMESPACE_URL, f"kifu-comment:{COLLECTION}:{self.source_type}:{self.source_id}"))
 
     def properties(self) -> dict[str, object]:
         return {
@@ -73,7 +75,7 @@ def ensure_schema(client: httpx.Client) -> None:
         ],
     }
     created = client.post("/v1/schema", json=payload)
-    if created.status_code not in {200, 201, 422}:
+    if created.status_code not in {200, 201}:
         created.raise_for_status()
 
 
@@ -84,7 +86,12 @@ def documents_for_user(db: Session, user_id: int) -> list[SearchDocument]:
         metadata = " / ".join(filter(None, [game.event_name, game.sente_name, game.gote_name]))
         documents.append(SearchDocument("game", game.id, game.id, None, game.original_filename, metadata or game.original_filename, game.event_name or "", user_id))
 
-    positions = list(db.scalars(select(CriticalPosition).join(Game).where(Game.user_id == user_id)))
+    positions = list(db.scalars(
+        select(CriticalPosition)
+        .join(Game)
+        .join(CommentSubmission, CommentSubmission.game_id == Game.id)
+        .where(Game.user_id == user_id, CommentSubmission.submitted_at.is_not(None))
+    ))
     game_by_id = {game.id: game for game in games}
     for position in positions:
         game = game_by_id[position.game_id]
@@ -139,7 +146,7 @@ def search_weaviate(db: Session, user_id: int, query: str, limit: int) -> list[d
         query_literal = json.dumps(query, ensure_ascii=False)
         graphql = f"""{{Get{{{COLLECTION}(
           bm25: {{query: {query_literal}, properties: ["title^2", "text", "eventName"]}}
-          where: {{path: [\"userId\"], operator: Equal, valueNumber: {user_id}}}
+          where: {{path: [\"userId\"], operator: Equal, valueInt: {user_id}}}
           limit: {limit}
         ){{sourceType sourceId gameId moveNumber title text eventName _additional{{score}}}}}}}}"""
         with _client() as client:
@@ -150,7 +157,7 @@ def search_weaviate(db: Session, user_id: int, query: str, limit: int) -> list[d
             raise RuntimeError(str(body["errors"]))
         owned_game_ids = set(db.scalars(select(Game.id).where(Game.user_id == user_id)))
         rows = body.get("data", {}).get("Get", {}).get(COLLECTION, [])
-        return [
+        results = [
             {
                 "source_type": row["sourceType"],
                 "source_id": row["sourceId"],
@@ -165,6 +172,9 @@ def search_weaviate(db: Session, user_id: int, query: str, limit: int) -> list[d
             for row in rows
             if row["gameId"] in owned_game_ids
         ]
+        # BM25が正常応答の0件でも、日本語トークン化や索引更新の遅延に
+        # 影響されず部分一致検索できるようDBへフォールバックする。
+        return results or search_database(db, user_id, query, limit)
     except (httpx.HTTPError, RuntimeError, ValueError, KeyError) as exc:
         logger.warning("Weaviate search failed; using database fallback: %s", exc)
         return search_database(db, user_id, query, limit)
@@ -177,7 +187,31 @@ def search_database(db: Session, user_id: int, query: str, limit: int) -> list[d
     for game in games:
         results.append({"source_type": "game", "source_id": game.id, "game_id": game.id, "move_number": None, "title": game.original_filename, "text": " / ".join(filter(None, [game.event_name, game.sente_name, game.gote_name])), "event_name": game.event_name, "score": 0.0, "backend": "database"})
     if len(results) < limit:
+        positions = list(db.execute(
+            select(CriticalPosition, Game)
+            .join(Game, Game.id == CriticalPosition.game_id)
+            .join(CommentSubmission, CommentSubmission.game_id == Game.id)
+            .where(
+                Game.user_id == user_id,
+                CommentSubmission.submitted_at.is_not(None),
+                or_(CriticalPosition.japanese_move.ilike(needle), CriticalPosition.selection_reason.ilike(needle)),
+            )
+            .limit(limit - len(results))
+        ))
+        for position, game in positions:
+            results.append({"source_type": "critical_position", "source_id": position.id, "game_id": game.id, "move_number": position.move_number, "title": f"{position.move_number}手目・{position.japanese_move}", "text": position.selection_reason, "event_name": game.event_name, "score": 0.0, "backend": "database"})
+    if len(results) < limit:
         answers = list(db.execute(select(CommentAnswer, CriticalPosition, Game).join(CommentSubmission, CommentSubmission.id == CommentAnswer.submission_id).join(CriticalPosition, CriticalPosition.id == CommentAnswer.critical_position_id).join(Game, Game.id == CriticalPosition.game_id).where(Game.user_id == user_id, CommentSubmission.submitted_at.is_not(None), CommentAnswer.answer_text.ilike(needle)).limit(limit - len(results))))
         for answer, position, game in answers:
             results.append({"source_type": "comment_answer", "source_id": answer.id, "game_id": game.id, "move_number": position.move_number, "title": f"{position.move_number}手目・回答{answer.question_number}", "text": answer.answer_text, "event_name": game.event_name, "score": 0.0, "backend": "database"})
+    if len(results) < limit:
+        ai_comments = list(db.execute(
+            select(AiComment, CriticalPosition, Game)
+            .join(CriticalPosition, CriticalPosition.id == AiComment.critical_position_id)
+            .join(Game, Game.id == CriticalPosition.game_id)
+            .where(Game.user_id == user_id, AiComment.current_text.ilike(needle))
+            .limit(limit - len(results))
+        ))
+        for comment, position, game in ai_comments:
+            results.append({"source_type": "ai_comment", "source_id": comment.id, "game_id": game.id, "move_number": position.move_number, "title": f"{position.move_number}手目・AIコメント", "text": comment.current_text, "event_name": game.event_name, "score": 0.0, "backend": "database"})
     return results[:limit]

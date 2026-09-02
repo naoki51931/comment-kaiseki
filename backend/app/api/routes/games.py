@@ -21,7 +21,7 @@ from app.services.engine import create_engine_adapter
 from shogi.KIF import Exporter as KifExporter
 from app.services.kif import KifValidationError, parse_game_file, parse_game_text
 from app.services.professional_games import is_professional_game
-from app.services.subscriptions import has_ai_access
+from app.services.subscriptions import has_ai_access, has_permanent_access
 from app.services.storage import MalwareDetectedError, remove_private_file, save_private_file
 from app.tasks import dispatch_analysis_outbox
 
@@ -328,8 +328,9 @@ def game_playback(
     submission = db.scalar(select(CommentSubmission).where(CommentSubmission.game_id == game_id))
     submitted = submission is not None and submission.submitted_at is not None
     test_user = bool(settings.ai_access_test_user_email) and user.email.lower() == settings.ai_access_test_user_email
-    evaluation_visible = submitted or test_user
-    ai_visible = has_ai_access(db, user.id) and (submitted or test_user)
+    permanent_access = has_permanent_access(db, user.id)
+    evaluation_visible = submitted or test_user or permanent_access
+    ai_visible = has_ai_access(db, user.id) and (submitted or test_user or permanent_access)
     analyses = {
         item.move_number: item
         for item in db.scalars(select(AnalysisResult).where(AnalysisResult.game_id == game_id))
@@ -405,7 +406,7 @@ def game_playback(
         "gote_name": game.gote_name,
         "user_side": game.user_side,
         "submitted": submitted,
-        "test_evaluation_toggle_available": test_user,
+        "test_evaluation_toggle_available": test_user or permanent_access,
         "ai_visible": ai_visible,
         "frames": frames,
     }
@@ -437,7 +438,8 @@ def analyze_branch_position(
     submission = db.scalar(select(CommentSubmission).where(CommentSubmission.game_id == game_id))
     submitted = submission is not None and submission.submitted_at is not None
     test_user = bool(settings.ai_access_test_user_email) and user.email.lower() == settings.ai_access_test_user_email
-    if not has_ai_access(db, user.id) or not (submitted or test_user):
+    permanent_access = has_permanent_access(db, user.id)
+    if not has_ai_access(db, user.id) or not (submitted or test_user or permanent_access):
         raise HTTPException(status_code=403, detail="分岐解析はコメント提出後、AI解説プランで利用できます。")
     if request.move_number > game.move_count:
         raise HTTPException(status_code=422, detail="分岐開始局面が棋譜の手数を超えています。")
@@ -459,6 +461,8 @@ def analyze_branch_position(
             "evaluation": normalize_evaluation(item.score_side_to_move, side_to_move=board.turn, user_side=game.user_side),
             "mate_in": normalize_mate(item.mate_in, side_to_move=board.turn, user_side=game.user_side),
             "principal_variation": japanese_variation(board, item.principal_variation),
+            # 日本語表記だけでは分岐盤へ候補手を適用できないため、盤面操作用のUSIも返す。
+            "usi_principal_variation": item.principal_variation,
         })
     return BranchAnalysis(
         evaluation=evaluation, mate_in=mate_in, win_rate=win_rate(evaluation or 0, mate_in),
@@ -508,6 +512,27 @@ def save_game_branch(
     db.refresh(branch)
     return branch
 
+
+@router.delete("/{game_id}/branches/{branch_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_game_branch(
+    game_id: int,
+    branch_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> Response:
+    game = db.get(GameModel, game_id)
+    if game is None or game.user_id != user.id:
+        raise HTTPException(status_code=404, detail="棋譜が見つかりません。")
+    branch = db.scalar(select(GameBranch).where(
+        GameBranch.id == branch_id, GameBranch.game_id == game_id, GameBranch.user_id == user.id,
+    ))
+    if branch is None:
+        raise HTTPException(status_code=404, detail="分岐が見つかりません。")
+    db.delete(branch)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.post("/{game_id}/comment-position/{move_number}", response_model=CriticalPosition, status_code=status.HTTP_201_CREATED)
 def create_comment_position(
     game_id: int,
@@ -546,13 +571,14 @@ def create_comment_position(
         db.commit()
         db.refresh(existing)
     submitted = submission is not None and submission.submitted_at is not None
+    evaluation_visible = submitted or has_permanent_access(db, user.id)
     return CriticalPosition(
         id=existing.id, game_id=existing.game_id, move_number=existing.move_number,
         japanese_move=existing.japanese_move, required=existing.required,
-        evaluation_before=existing.evaluation_before if submitted else None,
-        evaluation_after=existing.evaluation_after if submitted else None,
-        evaluation_delta=existing.evaluation_delta if submitted else None,
-        selection_reason=None, principal_variation=None, engine_explanation_visible=submitted,
+        evaluation_before=existing.evaluation_before if evaluation_visible else None,
+        evaluation_after=existing.evaluation_after if evaluation_visible else None,
+        evaluation_delta=existing.evaluation_delta if evaluation_visible else None,
+        selection_reason=None, principal_variation=None, engine_explanation_visible=evaluation_visible,
     )
 
 
@@ -567,7 +593,8 @@ def list_critical_positions(
         raise HTTPException(status_code=404, detail="棋譜が見つかりません。")
     submission = db.scalar(select(CommentSubmission).where(CommentSubmission.game_id == game_id))
     submitted = submission is not None and submission.submitted_at is not None
-    ai_visible = submitted and has_ai_access(db, user.id)
+    evaluation_visible = submitted or has_permanent_access(db, user.id)
+    ai_visible = has_ai_access(db, user.id) and (submitted or has_permanent_access(db, user.id))
     statement = (
         select(CriticalPositionModel)
         .where(CriticalPositionModel.game_id == game_id)
@@ -585,16 +612,16 @@ def list_critical_positions(
             move_number=item.move_number,
             japanese_move=japanese_move_at(game.initial_sfen, game.usi_moves, item.move_number),
             required=item.required,
-            evaluation_before=item.evaluation_before if submitted else None,
-            evaluation_after=item.evaluation_after if submitted else None,
-            evaluation_delta=item.evaluation_delta if submitted else None,
+            evaluation_before=item.evaluation_before if evaluation_visible else None,
+            evaluation_after=item.evaluation_after if evaluation_visible else None,
+            evaluation_delta=item.evaluation_delta if evaluation_visible else None,
             selection_reason=item.selection_reason if ai_visible else None,
             principal_variation=(
                 japanese_variation_at(game.initial_sfen, game.usi_moves, item.move_number, analyses[item.move_number].principal_variation)
                 if item.move_number in analyses
                 else []
             ) if ai_visible else None,
-            engine_explanation_visible=submitted,
+            engine_explanation_visible=evaluation_visible,
         )
         for item in positions
     ]

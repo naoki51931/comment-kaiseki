@@ -103,7 +103,7 @@ def analyze_game(db: Session, game: Game, engine: EngineAdapter) -> None:
             {
                 "evaluation": normalize_evaluation(item.score_side_to_move, side_to_move=pre_turn, user_side=game.user_side),
                 "mate_in": normalize_mate(item.mate_in, side_to_move=pre_turn, user_side=game.user_side),
-                "principal_variation": item.principal_variation[:5],
+                "principal_variation": item.principal_variation,
             }
             for item in ((pre_result.variations or [pre_result]) if pre_result else [])[:5]
         ]
@@ -143,7 +143,7 @@ def analyze_game(db: Session, game: Game, engine: EngineAdapter) -> None:
                     {
                         "evaluation": normalize_evaluation(item.score_side_to_move, side_to_move=evaluated_turn, user_side=game.user_side),
                         "mate_in": normalize_mate(item.mate_in, side_to_move=evaluated_turn, user_side=game.user_side),
-                        "principal_variation": item.principal_variation[:5],
+                        "principal_variation": item.principal_variation,
                     }
                     for item in (result.variations or [])[:5]
                 ],

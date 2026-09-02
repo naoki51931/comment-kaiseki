@@ -5,8 +5,6 @@ from app.config import settings
 
 
 def send_verification_email(to_email: str, verification_url: str) -> None:
-    if not settings.email_delivery_enabled:
-        return
     message = EmailMessage()
     message["Subject"] = "【棋譜コメント研究所】メールアドレスを確認してください"
     message["From"] = settings.smtp_from
@@ -17,6 +15,26 @@ def send_verification_email(to_email: str, verification_url: str) -> None:
         f"{verification_url}\n\n"
         "心当たりがない場合は、このメールを破棄してください。"
     )
+    send_email_message(message)
+
+
+def send_password_reset_email(to_email: str, reset_url: str) -> None:
+    message = EmailMessage()
+    message["Subject"] = "【棋譜コメント研究所】パスワード再設定"
+    message["From"] = settings.smtp_from
+    message["To"] = to_email
+    message.set_content(
+        "パスワードの再設定を受け付けました。\n"
+        "次のURLを1時間以内に開いて、新しいパスワードを登録してください。\n\n"
+        f"{reset_url}\n\n"
+        "心当たりがない場合は、このメールを破棄してください。パスワードは変更されません。"
+    )
+    send_email_message(message)
+
+
+def send_email_message(message: EmailMessage) -> None:
+    if not settings.email_delivery_enabled:
+        return
     if settings.smtp_starttls and settings.smtp_ssl:
         raise RuntimeError("SMTP_STARTTLSとSMTP_SSLは同時に有効化できません。")
     smtp_class = smtplib.SMTP_SSL if settings.smtp_ssl else smtplib.SMTP

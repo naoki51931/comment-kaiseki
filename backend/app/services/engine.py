@@ -196,13 +196,13 @@ class YaneuraOuEngine:
             if "pv" in tokens:
                 pv = tokens[tokens.index("pv") + 1 :]
                 multipv = int(tokens[tokens.index("multipv") + 1]) if "multipv" in tokens else 1
-                candidate_pv = pv[:5]
+                candidate_pv = pv
                 previous = variations.get(multipv)
                 if previous is not None and len(previous.principal_variation) > len(candidate_pv):
                     candidate_pv = previous.principal_variation
                 variations[multipv] = EngineVariation(score, mate, candidate_pv)
         ordered = [variations[key] for key in sorted(variations)[:5]]
-        primary = ordered[0] if ordered else EngineVariation(score, mate, pv[:5])
+        primary = ordered[0] if ordered else EngineVariation(score, mate, pv)
         return EngineEvaluation(primary.score_side_to_move, primary.mate_in, primary.principal_variation, ordered)
 
 

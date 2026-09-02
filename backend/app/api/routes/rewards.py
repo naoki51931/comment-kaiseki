@@ -37,6 +37,11 @@ class BankAccountRequest(BaseModel):
     account_holder: str = Field(min_length=1, max_length=100)
 
 
+def require_rewards_enabled() -> None:
+    if settings.reward_per_game_yen <= 0:
+        raise HTTPException(status_code=404, detail="報酬・振込機能は現在利用できません。")
+
+
 class PaymentRecordRequest(BaseModel):
     payment_reference: str = Field(min_length=1, max_length=255)
 
@@ -66,6 +71,8 @@ def reward_summary(
         )
     ) or 0
     return RewardSummary(
+        rewards_enabled=settings.reward_per_game_yen > 0,
+        reward_per_game_yen=settings.reward_per_game_yen,
         pending_yen=pending,
         fixed_yen=fixed,
         payout_available_yen=fixed if fixed >= settings.minimum_payout_yen else 0,
@@ -80,6 +87,7 @@ def save_bank_account(
     db: Annotated[Session, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
 ) -> None:
+    require_rewards_enabled()
     encrypted, fingerprint = encrypt_bank_payload(payload.model_dump())
     account = db.scalar(select(BankAccount).where(BankAccount.user_id == user.id))
     if account is None:
@@ -105,6 +113,7 @@ def request_payout(
     db: Annotated[Session, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
 ) -> dict[str, object]:
+    require_rewards_enabled()
     if db.scalar(select(BankAccount.id).where(BankAccount.user_id == user.id)) is None:
         raise HTTPException(status_code=409, detail="振込口座を登録してください。")
     rewards = list(

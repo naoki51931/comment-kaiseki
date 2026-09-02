@@ -2,6 +2,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
 import pyotp
+from google.auth.exceptions import GoogleAuthError
+from google.auth.transport import requests as google_requests
+from google.oauth2 import id_token
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, EmailStr, Field
@@ -11,8 +14,8 @@ from sqlalchemy.orm import Session
 from app.api.dependencies import get_current_user
 from app.config import settings
 from app.database import get_db
-from app.models import EmailVerificationToken, RefreshToken, User
-from app.services.email import send_verification_email
+from app.models import EmailVerificationToken, PasswordResetToken, RefreshToken, User
+from app.services.email import send_password_reset_email, send_verification_email
 from app.services.security import (
     create_access_token,
     decrypt_secret,
@@ -47,6 +50,15 @@ class ResendVerificationRequest(BaseModel):
     email: EmailStr
 
 
+class PasswordResetRequest(BaseModel):
+    email: EmailStr
+
+
+class PasswordResetConfirmRequest(BaseModel):
+    token: str = Field(min_length=1)
+    password: str = Field(min_length=12, max_length=128)
+
+
 class VerifyRequest(BaseModel):
     token: str
 
@@ -55,6 +67,10 @@ class LoginRequest(BaseModel):
     email: EmailStr
     password: str
     mfa_code: str | None = None
+
+
+class GoogleLoginRequest(BaseModel):
+    credential: str = Field(min_length=1)
 
 
 class TokenResponse(BaseModel):
@@ -161,6 +177,57 @@ def resend_verification(
     return response
 
 
+@router.post("/request-password-reset")
+def request_password_reset(payload: PasswordResetRequest, request: Request, db: Annotated[Session, Depends(get_db)]) -> dict[str, object]:
+    message = "登録済みのアドレスであれば、パスワード再設定メールを送信しました。"
+    user = db.scalar(select(User).where(User.email == payload.email.lower()))
+    if user is None or not user.email_verified:
+        return {"message": message}
+    now = datetime.now(timezone.utc)
+    latest = db.scalar(select(PasswordResetToken).where(PasswordResetToken.user_id == user.id).order_by(PasswordResetToken.created_at.desc()))
+    if latest is not None:
+        created_at = latest.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        if (now - created_at).total_seconds() < settings.email_resend_cooldown_seconds:
+            raise HTTPException(status_code=429, detail="再設定メールの送信はしばらく待ってからお試しください。")
+    plain_token = new_opaque_token()
+    for stored in db.scalars(select(PasswordResetToken).where(PasswordResetToken.user_id == user.id, PasswordResetToken.used_at.is_(None))):
+        stored.used_at = now
+    db.add(PasswordResetToken(user_id=user.id, token_hash=token_hash(plain_token), expires_at=now + timedelta(hours=1)))
+    forwarded_host = request.headers.get("x-forwarded-host")
+    host = forwarded_host or request.headers.get("host", "localhost")
+    scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
+    base_url = settings.public_base_url or f"{scheme}://{host}"
+    try:
+        send_password_reset_email(user.email, f"{base_url}/reset-password?token={plain_token}")
+    except OSError as exc:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="再設定メールを送信できませんでした。時間をおいて再度お試しください。") from exc
+    db.commit()
+    response: dict[str, object] = {"message": message}
+    if settings.expose_verification_token:
+        response["reset_token"] = plain_token
+    return response
+
+
+@router.post("/reset-password")
+def reset_password(payload: PasswordResetConfirmRequest, db: Annotated[Session, Depends(get_db)]) -> dict[str, str]:
+    stored = db.scalar(select(PasswordResetToken).where(PasswordResetToken.token_hash == token_hash(payload.token)))
+    now = datetime.now(timezone.utc)
+    if stored is None or stored.used_at is not None or expired(stored.expires_at, now):
+        raise HTTPException(status_code=422, detail="再設定リンクが無効または期限切れです。")
+    user = db.get(User, stored.user_id)
+    if user is None:
+        raise HTTPException(status_code=422, detail="再設定リンクが無効または期限切れです。")
+    user.password_hash = hash_password(payload.password)
+    stored.used_at = now
+    for refresh_token in db.scalars(select(RefreshToken).where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None))):
+        refresh_token.revoked_at = now
+    db.commit()
+    return {"message": "パスワードを変更しました。新しいパスワードでログインしてください。"}
+
+
 def consume_verification(token: str, db: Session) -> None:
     verification = db.scalar(
         select(EmailVerificationToken).where(EmailVerificationToken.token_hash == token_hash(token))
@@ -219,6 +286,34 @@ def login(payload: LoginRequest, db: Annotated[Session, Depends(get_db)]) -> Tok
             raise HTTPException(status_code=401, detail="MFAコードが無効です。")
         admin_authenticated = True
     return issue_tokens(db, user, admin_authenticated=admin_authenticated)
+
+
+@router.post("/google", response_model=TokenResponse)
+def google_login(payload: GoogleLoginRequest, db: Annotated[Session, Depends(get_db)]) -> TokenResponse:
+    if not settings.google_client_id:
+        raise HTTPException(status_code=503, detail="Googleログインは現在利用できません。")
+    try:
+        claims = id_token.verify_oauth2_token(payload.credential, google_requests.Request(), settings.google_client_id)
+    except (ValueError, GoogleAuthError) as exc:
+        raise HTTPException(status_code=401, detail="Googleの認証情報を確認できませんでした。") from exc
+    subject = claims.get("sub")
+    email = claims.get("email")
+    if not subject or not email or claims.get("email_verified") is not True:
+        raise HTTPException(status_code=401, detail="確認済みGoogleアカウントが必要です。")
+    user = db.scalar(select(User).where(User.google_subject == subject))
+    if user is None:
+        normalized_email = str(email).lower()
+        existing_user = db.scalar(select(User).where(User.email == normalized_email))
+        if existing_user is not None:
+            if existing_user.google_subject not in (None, str(subject)):
+                raise HTTPException(status_code=409, detail="このメールアドレスには別のGoogleアカウントが連携されています。")
+            existing_user.google_subject = str(subject)
+            user = existing_user
+        else:
+            user = User(email=normalized_email, password_hash=None, google_subject=str(subject), email_verified=True)
+            db.add(user)
+            db.flush()
+    return issue_tokens(db, user)
 
 
 @router.post("/refresh", response_model=TokenResponse)

@@ -139,3 +139,123 @@ def test_admin_privileges_require_mfa_for_each_login_session() -> None:
         assert client.get("/api/auth/me", headers=member_headers).json()["is_admin"] is False
     app.dependency_overrides.clear()
     Base.metadata.drop_all(engine)
+
+
+
+def test_password_reset_changes_password_and_revokes_sessions() -> None:
+    from app.config import settings
+    settings.expose_verification_token = True
+    settings.email_delivery_enabled = False
+    settings.email_resend_cooldown_seconds = 0
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    sessions = sessionmaker(bind=engine, expire_on_commit=False)
+    Base.metadata.create_all(engine)
+    with sessions() as db:
+        db.add(User(email="reset@example.com", password_hash=hash_password("old-secure-password"), email_verified=True))
+        db.commit()
+
+    def override_db() -> Generator[Session, None, None]:
+        with sessions() as session:
+            yield session
+
+    app.dependency_overrides.clear()
+    app.dependency_overrides[get_db] = override_db
+    with TestClient(app) as client:
+        original_login = client.post("/api/auth/login", json={"email": "reset@example.com", "password": "old-secure-password"})
+        assert original_login.status_code == 200
+        old_refresh_token = original_login.json()["refresh_token"]
+
+        unknown = client.post("/api/auth/request-password-reset", json={"email": "unknown@example.com"})
+        assert unknown.status_code == 200
+        assert "reset_token" not in unknown.json()
+
+        same_password_request = client.post("/api/auth/request-password-reset", json={"email": "reset@example.com"})
+        assert same_password_request.status_code == 200
+        same_password_token = same_password_request.json()["reset_token"]
+        same_password_reset = client.post("/api/auth/reset-password", json={"token": same_password_token, "password": "old-secure-password"})
+        assert same_password_reset.status_code == 200
+        assert client.post("/api/auth/login", json={"email": "reset@example.com", "password": "old-secure-password"}).status_code == 200
+
+        requested = client.post("/api/auth/request-password-reset", json={"email": "reset@example.com"})
+        assert requested.status_code == 200
+        reset_token = requested.json()["reset_token"]
+        reset = client.post("/api/auth/reset-password", json={"token": reset_token, "password": "new-secure-password"})
+        assert reset.status_code == 200
+        assert client.post("/api/auth/reset-password", json={"token": reset_token, "password": "another-password"}).status_code == 422
+        assert client.post("/api/auth/login", json={"email": "reset@example.com", "password": "old-secure-password"}).status_code == 401
+        assert client.post("/api/auth/login", json={"email": "reset@example.com", "password": "new-secure-password"}).status_code == 200
+        assert client.post("/api/auth/refresh", json={"refresh_token": old_refresh_token}).status_code == 401
+    app.dependency_overrides.clear()
+    Base.metadata.drop_all(engine)
+
+
+def test_google_login_creates_user_and_reuses_identity(monkeypatch) -> None:
+    from app.config import settings
+
+    settings.google_client_id = "test-client.apps.googleusercontent.com"
+    monkeypatch.setattr(
+        "app.api.routes.auth.id_token.verify_oauth2_token",
+        lambda credential, request, audience: {
+            "sub": "google-subject-123",
+            "email": "google-user@example.com",
+            "email_verified": True,
+        },
+    )
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    sessions = sessionmaker(bind=engine, expire_on_commit=False)
+    Base.metadata.create_all(engine)
+
+    def override_db() -> Generator[Session, None, None]:
+        with sessions() as session:
+            yield session
+
+    app.dependency_overrides.clear()
+    app.dependency_overrides[get_db] = override_db
+    with TestClient(app) as client:
+        first = client.post("/api/auth/google", json={"credential": "valid-token"})
+        assert first.status_code == 200
+        second = client.post("/api/auth/google", json={"credential": "valid-token"})
+        assert second.status_code == 200
+        with sessions() as db:
+            users = db.query(User).filter_by(google_subject="google-subject-123").all()
+            assert len(users) == 1
+            assert users[0].email == "google-user@example.com"
+            assert users[0].email_verified is True
+            assert users[0].password_hash is None
+    app.dependency_overrides.clear()
+    Base.metadata.drop_all(engine)
+
+
+def test_google_login_links_existing_verified_email(monkeypatch) -> None:
+    from app.config import settings
+
+    settings.google_client_id = "test-client.apps.googleusercontent.com"
+    monkeypatch.setattr(
+        "app.api.routes.auth.id_token.verify_oauth2_token",
+        lambda credential, request, audience: {
+            "sub": "different-google-subject",
+            "email": "existing@example.com",
+            "email_verified": True,
+        },
+    )
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    sessions = sessionmaker(bind=engine, expire_on_commit=False)
+    Base.metadata.create_all(engine)
+    with sessions() as db:
+        db.add(User(email="existing@example.com", password_hash=hash_password("existing-password"), email_verified=True))
+        db.commit()
+
+    def override_db() -> Generator[Session, None, None]:
+        with sessions() as session:
+            yield session
+
+    app.dependency_overrides.clear()
+    app.dependency_overrides[get_db] = override_db
+    with TestClient(app) as client:
+        response = client.post("/api/auth/google", json={"credential": "valid-token"})
+        assert response.status_code == 200
+        with sessions() as db:
+            linked = db.query(User).filter_by(email="existing@example.com").one()
+            assert linked.google_subject == "different-google-subject"
+    app.dependency_overrides.clear()
+    Base.metadata.drop_all(engine)

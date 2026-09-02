@@ -32,6 +32,7 @@ class Settings:
     smtp_starttls = env_bool("SMTP_STARTTLS")
     smtp_ssl = env_bool("SMTP_SSL")
     public_base_url = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+    google_client_id = os.getenv("GOOGLE_CLIENT_ID", "")
     storage_backend = os.getenv("STORAGE_BACKEND", "local")
     s3_bucket = os.getenv("S3_BUCKET", "")
     s3_prefix = os.getenv("S3_PREFIX", "private/kifu")

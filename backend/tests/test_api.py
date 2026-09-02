@@ -214,6 +214,17 @@ def test_branch_can_be_saved_and_listed_as_branch_one(client: TestClient) -> Non
     assert branches.json()[0]["usi_moves"] == ["7g7f", "3c3d"]
 
 
+def test_saved_branch_can_be_deleted(client: TestClient) -> None:
+    game_id = upload(client).json()["id"]
+    saved = client.post(f"/api/games/{game_id}/branches", json={"move_number": 0, "moves": ["7g7f"]})
+    branch_id = saved.json()["id"]
+
+    deleted = client.delete(f"/api/games/{game_id}/branches/{branch_id}")
+    assert deleted.status_code == 204
+    assert client.get(f"/api/games/{game_id}/branches").json() == []
+    assert client.delete(f"/api/games/{game_id}/branches/{branch_id}").status_code == 404
+
+
 def test_empty_branch_cannot_be_saved(client: TestClient) -> None:
     game_id = upload(client).json()["id"]
     assert client.post(f"/api/games/{game_id}/branches", json={"move_number": 0, "moves": []}).status_code == 422
