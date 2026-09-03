@@ -14,6 +14,7 @@ from app.database import Base, get_db
 from app.main import app
 from app.models import AnalysisStatus, CommentSubmission, Game, ProfessionalGameFingerprint, User
 from app.services.kif import parse_game_file
+from app.services.professional_names import matched_professional_names
 
 
 KIF = """#KIF version=2.0 encoding=UTF-8
@@ -93,6 +94,64 @@ def test_upload_persists_parsed_kif(client: TestClient) -> None:
     assert games[0]["original_filename"] == "sample.kif"
 
 
+def test_global_game_viewer_can_read_all_games_but_cannot_modify_them(client: TestClient) -> None:
+    game_id = upload(client).json()["id"]
+    sessions = client.app.state.testing_session
+    with sessions() as db:
+        owner = db.scalar(select(User).where(User.email == "owner@example.test"))
+        viewer = User(email="naoki.xyz.ueda.xyz.5@gmail.com", email_verified=True)
+        db.add(viewer)
+        db.commit()
+        db.refresh(viewer)
+        db.expunge(viewer)
+
+    app.dependency_overrides[get_current_user] = lambda: viewer
+    games = client.get("/api/games")
+    assert games.status_code == 200
+    assert games.json()[0]["id"] == game_id
+    assert games.json()[0]["owner_id"] == owner.id
+    assert games.json()[0]["owner_email"] == "owner@example.test"
+    assert client.get(f"/api/games/{game_id}/playback").status_code == 200
+    assert client.get(f"/api/games/{game_id}/critical-positions").status_code == 200
+    branch = client.post(
+        f"/api/games/{game_id}/branch-position",
+        json={"move_number": 0, "moves": []},
+    )
+    assert branch.status_code == 200
+    assert any(move["usi"] == "7g7f" for move in branch.json()["legal_moves"])
+    branch_analysis = client.post(
+        f"/api/games/{game_id}/branch-analysis",
+        json={"move_number": 0, "moves": []},
+    )
+    assert branch_analysis.status_code == 200
+    assert branch_analysis.json()["engine_name"]
+    assert client.delete(f"/api/games/{game_id}").status_code == 404
+    assert client.patch(f"/api/games/{game_id}/visibility", json={"is_public": True}).status_code == 404
+
+
+def test_professional_player_name_requires_confirmation_and_sets_suspicion_flag(client: TestClient) -> None:
+    professional_kif = KIF.replace("試作先手", "藤井聡太 竜王")
+    warning = client.post(
+        "/api/games",
+        data={"played_at": "2026-07-13", "user_side": "SENTE", "ownership_confirmed": "true", "posting_terms_agreed": "true", "game_text": professional_kif},
+    )
+    assert warning.status_code == 409
+    assert warning.json()["detail"]["code"] == "PROFESSIONAL_NAME_CONFIRMATION_REQUIRED"
+    assert warning.json()["detail"]["matched_names"] == ["藤井 聡太"]
+
+    confirmed = client.post(
+        "/api/games",
+        data={"played_at": "2026-07-13", "user_side": "SENTE", "ownership_confirmed": "true", "posting_terms_agreed": "true", "professional_name_confirmed": "true", "game_text": professional_kif},
+    )
+    assert confirmed.status_code == 202
+    assert confirmed.json()["professional_name_suspected"] is True
+    assert confirmed.json()["professional_name_matches"] == ["藤井 聡太"]
+
+
+def test_professional_name_matching_normalizes_spaces_and_titles() -> None:
+    assert matched_professional_names("藤井聡太竜王", "試作後手") == ["藤井 聡太"]
+
+
 def test_upload_can_be_registered_as_public(client: TestClient) -> None:
     response = client.post(
         "/api/games",
@@ -109,6 +168,22 @@ def test_upload_can_be_registered_as_public(client: TestClient) -> None:
     assert response.status_code == 202
     assert response.json()["is_public"] is True
     assert client.get("/api/games").json()[0]["is_public"] is True
+
+    app.dependency_overrides.pop(get_current_user)
+    game_id = response.json()["id"]
+    playback = client.get(f"/api/games/public/{game_id}/playback")
+    assert playback.status_code == 200
+    assert playback.json()["frames"][1]["japanese_move"] == "７六歩(77)"
+    branch = client.post(
+        f"/api/games/public/{game_id}/branch-position",
+        json={"move_number": 0, "moves": []},
+    )
+    assert branch.status_code == 200
+    analysis = client.post(
+        f"/api/games/public/{game_id}/branch-analysis",
+        json={"move_number": 0, "moves": []},
+    )
+    assert analysis.status_code == 200
 
 
 def test_owner_can_edit_game_visibility(client: TestClient) -> None:

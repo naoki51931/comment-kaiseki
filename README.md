@@ -158,6 +158,10 @@ sudo docker compose run --rm backend alembic check
 
 ログインユーザー自身の棋譜、重要局面、提出済み回答、AIコメントを日本語で横断検索できます。Weaviateが利用できない場合はDB検索へ自動で切り替わります。詳細は [実装状況20260714.md](./実装状況20260714.md) を参照してください。
 
+## 全棋譜の閲覧専用アカウント
+
+`GLOBAL_GAME_VIEWER_EMAIL` に指定したアカウントは、非公開を含む全ユーザーの棋譜一覧、盤面再生、重要局面を閲覧できます。他ユーザーの棋譜の削除、公開設定変更、再解析、コメント編集は許可されません。既定値は `naoki.xyz.ueda.xyz.5@gmail.com` で、空欄にすると無効になります。
+
 ## セキュリティ更新（2026-07-14）
 
 - FastAPI 0.139.0、Starlette 1.3.1、python-multipart 0.0.32へ更新。
@@ -177,3 +181,19 @@ sudo docker compose run --rm backend alembic check
 - USIアダプターはやねうら王の `MultiPV=5` に対応し、各局面で最大5候補、各候補最大5手、投稿者視点の評価値を保存します。
 - 評価値本体は無料表示、5分岐の読み筋はAI月額プラン（初回1か月無料、その後月額1,000円）で表示します。
 - 現在のDocker稼働設定は `ENGINE_KIND=yaneuraou` で、やねうら王 NNUE 9.60git 64AVX2と水匠5評価関数を使用しています。
+
+
+## PWA・Androidアプリ
+
+フロントエンドはPWAとしてホーム画面へインストールできます。Capacitor製Androidプロジェクトは
+`frontend/android/` にあり、本番サイトをHTTPSで表示します。
+
+```bash
+cd frontend
+npm ci
+npm run build
+npm run android:sync
+npm run android:debug
+```
+
+詳しい公開・署名・検証手順は [ANDROID.md](./ANDROID.md) を参照してください。

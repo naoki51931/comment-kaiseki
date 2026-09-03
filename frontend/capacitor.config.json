@@ -1,0 +1,12 @@
+{
+  "appId": "com.kifucommentlab.app",
+  "appName": "棋譜コメント研究所",
+  "webDir": "dist",
+  "server": {
+    "url": "https://kifu-comment-lab.com",
+    "cleartext": false
+  },
+  "android": {
+    "allowMixedContent": false
+  }
+}

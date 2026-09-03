@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.routes import admin, auth, comments, games, health, rewards, search, skill_estimation, subscriptions
+from app.api.routes import admin, auth, comments, downloads, games, health, rewards, search, skill_estimation, subscriptions
 
 
 api_router = APIRouter()
@@ -13,3 +13,4 @@ api_router.include_router(rewards.router, prefix="/api/rewards", tags=["rewards"
 api_router.include_router(subscriptions.router, prefix="/api/ai-access", tags=["ai-access"])
 api_router.include_router(search.router, prefix="/api/search", tags=["search"])
 api_router.include_router(skill_estimation.router, prefix="/api/skill-estimation", tags=["skill-estimation"])
+api_router.include_router(downloads.router, prefix="/api/downloads", tags=["downloads"])

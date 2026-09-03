@@ -215,3 +215,75 @@ def search_database(db: Session, user_id: int, query: str, limit: int) -> list[d
         for comment, position, game in ai_comments:
             results.append({"source_type": "ai_comment", "source_id": comment.id, "game_id": game.id, "move_number": position.move_number, "title": f"{position.move_number}手目・AIコメント", "text": comment.current_text, "event_name": game.event_name, "score": 0.0, "backend": "database"})
     return results[:limit]
+
+
+def search_public_database(
+    db: Session, query: str, limit: int, move_number: int | None = None
+) -> list[dict[str, object]]:
+    """公開指定された棋譜と、その提出済み局面・回答だけを検索する。"""
+    needle = f"%{query}%"
+    results: list[dict[str, object]] = []
+    game_filters = [Game.is_public.is_(True)]
+    if move_number is not None:
+        game_filters.append(Game.move_count >= move_number)
+    games = list(db.scalars(
+        select(Game).where(
+            *game_filters,
+            or_(
+                Game.original_filename.ilike(needle),
+                Game.event_name.ilike(needle),
+                Game.sente_name.ilike(needle),
+                Game.gote_name.ilike(needle),
+            ),
+        )
+        .limit(limit)
+    ))
+    for game in games:
+        results.append({
+            "source_type": "game", "source_id": game.id, "game_id": game.id,
+            "move_number": None, "move_count": game.move_count, "title": game.original_filename,
+            "text": " / ".join(filter(None, [game.event_name, game.sente_name, game.gote_name])),
+            "event_name": game.event_name, "score": 0.0, "backend": "database",
+        })
+    if len(results) < limit:
+        positions = list(db.execute(
+            select(CriticalPosition, Game)
+            .join(Game, Game.id == CriticalPosition.game_id)
+            .join(CommentSubmission, CommentSubmission.game_id == Game.id)
+            .where(
+                Game.is_public.is_(True),
+                CriticalPosition.move_number == move_number if move_number is not None else True,
+                CommentSubmission.submitted_at.is_not(None),
+                or_(CriticalPosition.japanese_move.ilike(needle), CriticalPosition.selection_reason.ilike(needle)),
+            )
+            .limit(limit - len(results))
+        ))
+        for position, game in positions:
+            results.append({
+                "source_type": "critical_position", "source_id": position.id, "game_id": game.id,
+                "move_number": position.move_number, "move_count": game.move_count, "title": f"{position.move_number}手目・{position.japanese_move}",
+                "text": position.selection_reason, "event_name": game.event_name,
+                "score": 0.0, "backend": "database",
+            })
+    if len(results) < limit:
+        answers = list(db.execute(
+            select(CommentAnswer, CriticalPosition, Game)
+            .join(CommentSubmission, CommentSubmission.id == CommentAnswer.submission_id)
+            .join(CriticalPosition, CriticalPosition.id == CommentAnswer.critical_position_id)
+            .join(Game, Game.id == CriticalPosition.game_id)
+            .where(
+                Game.is_public.is_(True),
+                CriticalPosition.move_number == move_number if move_number is not None else True,
+                CommentSubmission.submitted_at.is_not(None),
+                CommentAnswer.answer_text.ilike(needle),
+            )
+            .limit(limit - len(results))
+        ))
+        for answer, position, game in answers:
+            results.append({
+                "source_type": "comment_answer", "source_id": answer.id, "game_id": game.id,
+                "move_number": position.move_number, "move_count": game.move_count, "title": f"{position.move_number}手目・匿名コメント{answer.question_number}",
+                "text": answer.answer_text, "event_name": game.event_name,
+                "score": 0.0, "backend": "database",
+            })
+    return results[:limit]

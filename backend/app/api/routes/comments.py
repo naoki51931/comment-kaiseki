@@ -10,6 +10,7 @@ from app.database import get_db
 from app.models import (
     AiComment,
     AiCommentFeedback,
+    AnalysisResult,
     AuditLog,
     CommentAnswer,
     CommentSubmission,
@@ -124,7 +125,7 @@ def submit_comments(
     db: Annotated[Session, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
 ) -> SubmitResponse:
-    owned_game(db, game_id, user.id)
+    game = owned_game(db, game_id, user.id)
     submission = get_or_create_submission(db, game_id, user.id)
     if submission.submitted_at is not None:
         raise HTTPException(status_code=409, detail="コメントは提出済みです。")
@@ -149,8 +150,35 @@ def submit_comments(
         raise HTTPException(status_code=422, detail="コメントを1つ以上入力してください。")
 
     now = datetime.now(timezone.utc)
+    anonymous_learning = user.email.endswith("@anonymous.invalid")
+    analyses = {
+        item.move_number: item
+        for item in db.scalars(select(AnalysisResult).where(AnalysisResult.game_id == game_id))
+    }
+    learning_positions = []
+    if anonymous_learning:
+        for position in db.scalars(
+            select(CriticalPosition).where(CriticalPosition.game_id == game_id).order_by(CriticalPosition.move_number)
+        ):
+            analysis = analyses.get(position.move_number)
+            learning_positions.append({
+                "critical_position_id": position.id,
+                "move_number": position.move_number,
+                "japanese_move": position.japanese_move,
+                "sfen_before": analysis.sfen_before if analysis else None,
+                "sfen_after": analysis.sfen_after if analysis else None,
+            })
     snapshot = {
         "game_id": game_id,
+        # 匿名投稿はトップページで学習利用へ明示同意してから作成される。
+        # 個人アカウントの回答は、別途同意UIを用意するまで学習対象にしない。
+        "learning_consent": anonymous_learning,
+        "contributor": "anonymous" if anonymous_learning else "registered",
+        "learning_context": {
+            "initial_sfen": game.initial_sfen,
+            "usi_moves": list(game.usi_moves),
+            "positions": learning_positions,
+        } if anonymous_learning else None,
         "positions": [
             {
                 "id": position.id,
@@ -181,7 +209,11 @@ def submit_comments(
             action="comments.submit",
             target_type="comment_submission",
             target_id=str(submission.id),
-            details={"game_id": game_id},
+            details={
+                "game_id": game_id,
+                "learning_consent": snapshot["learning_consent"],
+                "contributor": snapshot["contributor"],
+            },
         )
     )
     db.commit()

@@ -69,6 +69,8 @@ class Game(Base):
     played_at: Mapped[date] = mapped_column(Date)
     user_side: Mapped[str] = mapped_column(String(5))
     is_public: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    professional_name_suspected: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    professional_name_matches: Mapped[list[str]] = mapped_column(JSON, default=list)
     initial_sfen: Mapped[str] = mapped_column(Text)
     usi_moves: Mapped[list[str]] = mapped_column(JSON)
     move_count: Mapped[int] = mapped_column(Integer)

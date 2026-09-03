@@ -11,7 +11,7 @@ from app.models import (
     AccessCodeRedemption, AiAccessSubscription, AnalysisResult, AuditLog,
     CommentSubmission, CriticalPosition, Game, GameBranch, Review, ReviewStatus, User,
 )
-from app.schemas import BranchPositionRequest
+from app.schemas import BranchPositionRequest, GameVisibilityUpdate
 from app.api.routes.games import branch_position, game_playback
 from app.services.analysis import japanese_move_at, japanese_variation_at
 from app.services.rewards import grant_reward
@@ -68,7 +68,7 @@ def list_games(db: Annotated[Session, Depends(get_db)], _: Annotated[User, Depen
     result = []
     for game, email in rows:
         match_rate, analyzed_moves = professional_level_match(game, analyses_by_game.get(game.id, []))
-        result.append({"id": game.id, "user_id": game.user_id, "user_email": email, "original_filename": game.original_filename, "event_name": game.event_name, "sente_name": game.sente_name, "gote_name": game.gote_name, "played_at": game.played_at, "user_side": game.user_side, "is_public": game.is_public, "move_count": game.move_count, "analysis_status": game.analysis_status, "critical_position_count": game.critical_position_count, "created_at": game.created_at, "best_move_match_rate": match_rate, "match_rate_analyzed_moves": analyzed_moves, "professional_level_deletion_candidate": analyzed_moves >= PRO_LEVEL_MIN_MOVES and match_rate is not None and match_rate >= PRO_LEVEL_MATCH_RATE})
+        result.append({"id": game.id, "user_id": game.user_id, "user_email": email, "original_filename": game.original_filename, "event_name": game.event_name, "sente_name": game.sente_name, "gote_name": game.gote_name, "played_at": game.played_at, "user_side": game.user_side, "is_public": game.is_public, "move_count": game.move_count, "analysis_status": game.analysis_status, "critical_position_count": game.critical_position_count, "created_at": game.created_at, "best_move_match_rate": match_rate, "match_rate_analyzed_moves": analyzed_moves, "professional_level_deletion_candidate": analyzed_moves >= PRO_LEVEL_MIN_MOVES and match_rate is not None and match_rate >= PRO_LEVEL_MATCH_RATE, "professional_name_suspected": game.professional_name_suspected, "professional_name_matches": game.professional_name_matches})
     return result
 
 
@@ -81,6 +81,29 @@ def admin_game_playback(game_id: int, db: Annotated[Session, Depends(get_db)], _
     if owner is None:
         raise HTTPException(status_code=404, detail="投稿ユーザーが見つかりません。")
     return game_playback(game_id=game_id, db=db, user=owner)
+
+
+@router.patch("/games/{game_id}/visibility")
+def update_game_visibility(
+    game_id: int,
+    payload: GameVisibilityUpdate,
+    db: Annotated[Session, Depends(get_db)],
+    admin: Annotated[User, Depends(require_admin)],
+) -> dict[str, object]:
+    game = db.get(Game, game_id)
+    if game is None:
+        raise HTTPException(status_code=404, detail="棋譜が見つかりません。")
+    previous = game.is_public
+    game.is_public = payload.is_public
+    db.add(AuditLog(
+        actor_user_id=admin.id,
+        action="admin.game.visibility.update",
+        target_type="game",
+        target_id=str(game.id),
+        details={"from": previous, "to": game.is_public, "owner_user_id": game.user_id},
+    ))
+    db.commit()
+    return {"id": game.id, "is_public": game.is_public}
 
 
 @router.get("/games/{game_id}/branches")

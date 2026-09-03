@@ -5,7 +5,7 @@ import jwt
 
 import pyotp
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -13,6 +13,33 @@ from app.database import Base, get_db
 from app.main import app
 from app.models import RefreshToken, User
 from app.services.security import encrypt_secret, hash_password
+
+
+def test_anonymous_login_creates_private_session_without_personal_information() -> None:
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    sessions = sessionmaker(bind=engine, expire_on_commit=False)
+    Base.metadata.create_all(engine)
+
+    def override_db() -> Generator[Session, None, None]:
+        with sessions() as session:
+            yield session
+
+    app.dependency_overrides.clear()
+    app.dependency_overrides[get_db] = override_db
+    with TestClient(app) as client:
+        response = client.post("/api/auth/anonymous")
+        assert response.status_code == 201
+        access_token = response.json()["access_token"]
+        me = client.get("/api/auth/me", headers={"Authorization": f"Bearer {access_token}"})
+        assert me.status_code == 200
+        assert me.json()["is_anonymous"] is True
+        assert me.json()["email"] == "匿名ユーザー"
+
+    with sessions() as db:
+        user = db.scalar(select(User))
+        assert user is not None
+        assert user.password_hash is None
+        assert user.email_verified is True
 
 
 def test_register_verify_login_and_access_token() -> None:

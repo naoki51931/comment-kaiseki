@@ -27,6 +27,7 @@ from app.models import (
     ReviewStatus,
     User,
 )
+from app.services.ai_comments import approved_training_examples, contributor_weight
 
 
 def test_professional_level_match_requires_twenty_moves() -> None:
@@ -36,6 +37,12 @@ def test_professional_level_match_requires_twenty_moves() -> None:
     rate, count = professional_level_match(game, analyses)
     assert rate == 100
     assert count == 20
+
+
+def test_higher_rank_and_confidence_receive_more_comment_weight() -> None:
+    assert contributor_weight(2100, 88) > contributor_weight(1800, 88)
+    assert contributor_weight(2100, 88) > contributor_weight(2100, 35)
+    assert contributor_weight(None, 0) == 0.25
 
 
 def test_comment_privacy_submission_review_and_reward() -> None:
@@ -212,6 +219,11 @@ def test_comment_privacy_submission_review_and_reward() -> None:
         assert admin_games.json()[0]["match_rate_analyzed_moves"] == 1
         assert admin_games.json()[0]["professional_level_deletion_candidate"] is False
         assert "storage_path" not in admin_games.json()[0]
+        visibility = client.patch(
+            f"/api/admin/games/{game.id}/visibility", json={"is_public": True}
+        )
+        assert visibility.status_code == 200
+        assert visibility.json() == {"id": game.id, "is_public": True}
         admin_playback = client.get(f"/api/admin/games/{game.id}/playback")
         assert admin_playback.status_code == 200
         assert admin_playback.json()["frames"][1]["japanese_move"] == "７六歩(77)"
@@ -226,6 +238,9 @@ def test_comment_privacy_submission_review_and_reward() -> None:
         with sessions() as snapshot_db:
             saved_snapshot = snapshot_db.scalar(select(CommentSubmission)).submitted_snapshot
             assert len(saved_snapshot["answers"]) == 1
+            assert saved_snapshot["learning_consent"] is False
+            assert saved_snapshot["contributor"] == "registered"
+            assert saved_snapshot["learning_context"] is None
         detail = client.get(f"/api/admin/reviews/{reviews[0]['id']}")
         assert detail.status_code == 200
         assert detail.json()["game"]["filename"] == "workflow.kif"
@@ -243,5 +258,29 @@ def test_comment_privacy_submission_review_and_reward() -> None:
         assert submission.review_status == ReviewStatus.APPROVED.value
         assert reward.amount_yen == settings.reward_per_game_yen
         assert reward.status == "FIXED"
+        assert approved_training_examples(db) == []
+        anonymous_snapshot = dict(submission.submitted_snapshot or {})
+        anonymous_snapshot.update({
+            "learning_consent": True,
+            "contributor": "anonymous",
+            "learning_context": {
+                "initial_sfen": game.initial_sfen,
+                "usi_moves": game.usi_moves,
+                "positions": [{
+                    "critical_position_id": position.id,
+                    "move_number": position.move_number,
+                    "japanese_move": position.japanese_move,
+                    "sfen_before": game.initial_sfen,
+                    "sfen_after": game.initial_sfen,
+                }],
+            },
+        })
+        submission.submitted_snapshot = anonymous_snapshot
+        db.commit()
+        examples = approved_training_examples(db)
+        assert len(examples) == 1
+        assert examples[0]["kifu"]["usi_moves"] == ["7g7f"]
+        assert examples[0]["position"]["sfen_before"] == game.initial_sfen
+        assert examples[0]["comments"][0]["text"] == "回答"
     app.dependency_overrides.clear()
     Base.metadata.drop_all(engine)

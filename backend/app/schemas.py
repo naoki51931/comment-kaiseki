@@ -9,6 +9,8 @@ class Game(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    owner_id: int | None = None
+    owner_email: str | None = None
     original_filename: str
     event_name: str | None = None
     sente_name: str | None = None
@@ -16,6 +18,8 @@ class Game(BaseModel):
     played_at: date
     user_side: str
     is_public: bool = False
+    professional_name_suspected: bool = False
+    professional_name_matches: list[str] = Field(default_factory=list)
     move_count: int | None = None
     analysis_status: AnalysisStatus
     analysis_error: str | None = None
@@ -152,6 +156,7 @@ class SearchResult(BaseModel):
     source_id: int
     game_id: int
     move_number: int | None = None
+    move_count: int | None = None
     title: str
     text: str
     event_name: str | None = None

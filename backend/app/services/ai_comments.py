@@ -3,17 +3,108 @@ from difflib import SequenceMatcher
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models import AiComment, AiCommentFeedback, CommentAnswer, CommentSubmission, CriticalPosition, GameSkillAnalysis
+from app.models import AiComment, AiCommentFeedback, AnalysisResult, CommentAnswer, CommentSubmission, CriticalPosition, GameSkillAnalysis, ReviewStatus
+from app.services.skill_estimation import confidence_for_games
 
-MODEL_VERSION = "comment-retrieval-v2-skill-weighted"
+MODEL_VERSION = "comment-retrieval-v4-board-context-skill-weighted"
 HISTORICAL_ANSWER_LIMIT = 6
+
+
+def contributor_weight(estimated_rating: int | None, confidence_percent: int) -> float:
+    """高い推定段位を強く、少数局による不確かな判定を控えめに重み付けする。"""
+    rating_factor = .5 if estimated_rating is None else max(.5, min(2.5, estimated_rating / 1000))
+    confidence_factor = .5 + max(0, min(100, confidence_percent)) / 200
+    return round(rating_factor * confidence_factor, 3)
 
 def text_diff(before: str, after: str) -> list[dict[str, object]]:
     return [{"operation": tag, "before": before[i1:i2], "after": after[j1:j2], "before_start": i1, "after_start": j1} for tag, i1, i2, j1, j2 in SequenceMatcher(None, before, after).get_opcodes() if tag != "equal"]
 
+
+def approved_training_examples(db: Session) -> list[dict[str, object]]:
+    """匿名化した棋譜・局面図・コメントを一組の学習例として返す。"""
+    examples: list[dict[str, object]] = []
+    submissions = db.scalars(
+        select(CommentSubmission).where(CommentSubmission.review_status == ReviewStatus.APPROVED.value)
+    )
+    for submission in submissions:
+        snapshot = submission.submitted_snapshot or {}
+        context = snapshot.get("learning_context") or {}
+        if (
+            not snapshot.get("learning_consent")
+            or snapshot.get("contributor") != "anonymous"
+            or not context.get("initial_sfen")
+            or not isinstance(context.get("usi_moves"), list)
+        ):
+            continue
+        skill = db.scalar(select(GameSkillAnalysis).where(GameSkillAnalysis.game_id == submission.game_id))
+        analyzed_games = db.scalar(
+            select(func.count(GameSkillAnalysis.id)).where(GameSkillAnalysis.user_id == submission.user_id)
+        ) or 0
+        confidence_label, confidence_percent = confidence_for_games(analyzed_games)
+        positions = {
+            item.get("critical_position_id"): item
+            for item in context.get("positions", [])
+            if isinstance(item, dict) and item.get("sfen_before")
+        }
+        answers = list(db.scalars(select(CommentAnswer).where(CommentAnswer.submission_id == submission.id)))
+        for position_id, position in positions.items():
+            comments = [
+                {"answer_id": answer.id, "question_number": answer.question_number, "text": answer.answer_text}
+                for answer in answers
+                if answer.critical_position_id == position_id and answer.answer_text.strip()
+            ]
+            if comments:
+                examples.append({
+                    "kifu": {"initial_sfen": context["initial_sfen"], "usi_moves": context["usi_moves"]},
+                    "position": position,
+                    "comments": comments,
+                    "contributor_skill": {
+                        "estimated_rating": skill.estimated_rating if skill else None,
+                        "estimated_rank": skill.estimated_rank if skill else "未判定",
+                        "confidence_label": confidence_label,
+                        "confidence_percent": confidence_percent,
+                        "weight": contributor_weight(skill.estimated_rating if skill else None, confidence_percent),
+                    },
+                })
+    return examples
+
 def _historical_answers(db: Session, position: CriticalPosition) -> list[CommentAnswer]:
-    """同じ手数の回答を、推定棋力を主、更新日時を従として並べる。"""
-    return list(db.scalars(select(CommentAnswer).join(CriticalPosition, CriticalPosition.id == CommentAnswer.critical_position_id).join(CommentSubmission, CommentSubmission.id == CommentAnswer.submission_id).outerjoin(GameSkillAnalysis, GameSkillAnalysis.game_id == CommentSubmission.game_id).where(CriticalPosition.move_number == position.move_number, CriticalPosition.id != position.id, CommentSubmission.submitted_at.is_not(None)).order_by(func.coalesce(GameSkillAnalysis.estimated_rating, 0).desc(), CommentAnswer.updated_at.desc(), CommentAnswer.id.desc()).limit(HISTORICAL_ANSWER_LIMIT)))
+    """棋譜・局面図付きの承認済み匿名学習例から回答を参照する。"""
+    current_analysis = db.scalar(select(AnalysisResult).where(
+        AnalysisResult.game_id == position.game_id,
+        AnalysisResult.move_number == position.move_number,
+    ))
+    examples = approved_training_examples(db)
+    matching_ids: list[int] = []
+    weights: dict[int, float] = {}
+    for example in examples:
+        example_position = example["position"]
+        if not isinstance(example_position, dict) or example_position.get("move_number") != position.move_number:
+            continue
+        if current_analysis is not None and example_position.get("sfen_before") != current_analysis.sfen_before:
+            continue
+        weight = float(example.get("contributor_skill", {}).get("weight", .25))
+        for comment in example["comments"]:
+            if isinstance(comment, dict) and comment.get("answer_id") is not None:
+                answer_id = int(comment["answer_id"])
+                matching_ids.append(answer_id)
+                weights[answer_id] = weight
+    if not matching_ids:
+        return []
+    candidates = list(db.scalars(
+        select(CommentAnswer)
+        .join(CriticalPosition, CriticalPosition.id == CommentAnswer.critical_position_id)
+        .join(CommentSubmission, CommentSubmission.id == CommentAnswer.submission_id)
+        .outerjoin(GameSkillAnalysis, GameSkillAnalysis.game_id == CommentSubmission.game_id)
+        .where(
+            CriticalPosition.move_number == position.move_number,
+            CriticalPosition.id != position.id,
+            CommentAnswer.id.in_(matching_ids),
+        )
+        .order_by(CommentAnswer.updated_at.desc(), CommentAnswer.id.desc())
+    ))
+    candidates.sort(key=lambda answer: (weights.get(answer.id, .25), answer.updated_at), reverse=True)
+    return candidates[:HISTORICAL_ANSWER_LIMIT]
 
 def _preferred_feedback(db: Session, move_number: int) -> AiCommentFeedback | None:
     """修正文も回答者の最高推定棋力を優先し、同棋力なら新しいものを使う。"""

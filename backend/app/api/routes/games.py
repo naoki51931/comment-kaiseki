@@ -21,6 +21,7 @@ from app.services.engine import create_engine_adapter
 from shogi.KIF import Exporter as KifExporter
 from app.services.kif import KifValidationError, parse_game_file, parse_game_text
 from app.services.professional_games import is_professional_game
+from app.services.professional_names import matched_professional_names
 from app.services.subscriptions import has_ai_access, has_permanent_access
 from app.services.storage import MalwareDetectedError, remove_private_file, save_private_file
 from app.tasks import dispatch_analysis_outbox
@@ -34,6 +35,20 @@ QUESTION_LABELS = [
     "どの候補手を比較しましたか？",
     "今振り返ると、判断の原因は何だったと思いますか？",
 ]
+
+
+def can_view_all_games(user: User) -> bool:
+    return bool(settings.global_game_viewer_email) and user.email.lower() == settings.global_game_viewer_email
+
+
+def can_view_game(user: User, game: GameModel) -> bool:
+    return game.user_id == user.id or can_view_all_games(user)
+
+
+def game_view(game: GameModel, owner_email: str | None = None) -> Game:
+    return Game.model_validate(game).model_copy(
+        update={"owner_id": game.user_id, "owner_email": owner_email}
+    )
 
 
 def board_snapshot(board: shogi.Board) -> dict[str, object]:
@@ -128,9 +143,81 @@ def branch_board(game: GameModel, request: BranchPositionRequest) -> shogi.Board
 def list_games(
     db: Annotated[Session, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
-) -> list[GameModel]:
-    statement = select(GameModel).where(GameModel.user_id == user.id).order_by(GameModel.created_at.desc())
-    return list(db.scalars(statement))
+) -> list[Game]:
+    statement = select(GameModel, User.email).join(User, User.id == GameModel.user_id)
+    if not can_view_all_games(user):
+        statement = statement.where(GameModel.user_id == user.id)
+    rows = db.execute(statement.order_by(GameModel.created_at.desc())).all()
+    return [game_view(game, owner_email) for game, owner_email in rows]
+
+
+def public_game(db: Session, game_id: int) -> GameModel:
+    game = db.get(GameModel, game_id)
+    if game is None or not game.is_public:
+        raise HTTPException(status_code=404, detail="公開棋譜が見つかりません。")
+    return game
+
+
+@router.get("/public/{game_id}/playback")
+def public_game_playback(game_id: int, db: Annotated[Session, Depends(get_db)]) -> dict[str, object]:
+    game = public_game(db, game_id)
+    owner = db.get(User, game.user_id)
+    if owner is None:
+        raise HTTPException(status_code=404, detail="投稿ユーザーが見つかりません。")
+    payload = game_playback(game_id=game_id, db=db, user=owner)
+    payload["test_evaluation_toggle_available"] = False
+    payload["ai_visible"] = False
+    for frame in payload["frames"]:
+        frame["evaluation"] = None
+        frame["win_rate"] = None
+        frame["principal_variation"] = None
+        frame["variations"] = None
+        frame["selection_reason"] = None
+        frame["comments"] = []
+    return payload
+
+
+@router.post("/public/{game_id}/branch-position", response_model=BranchPosition)
+def public_branch_position(
+    game_id: int,
+    request: BranchPositionRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> BranchPosition:
+    return branch_position(public_game(db, game_id), request)
+
+
+@router.post("/public/{game_id}/branch-analysis", response_model=BranchAnalysis)
+def public_branch_analysis(
+    game_id: int,
+    request: BranchPositionRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> BranchAnalysis:
+    game = public_game(db, game_id)
+    if request.move_number > game.move_count:
+        raise HTTPException(status_code=422, detail="分岐開始局面が棋譜の手数を超えています。")
+    board = branch_board(game, request)
+    engine = create_engine_adapter()
+    try:
+        result = engine.analyze(board.sfen())
+    except (RuntimeError, TimeoutError, OSError):
+        raise HTTPException(status_code=503, detail="解析エンジンが応答しませんでした。時間をおいて再度お試しください。") from None
+    finally:
+        close = getattr(engine, "close", None)
+        if close is not None:
+            close()
+    evaluation = normalize_evaluation(result.score_side_to_move, side_to_move=board.turn, user_side=game.user_side)
+    mate_in = normalize_mate(result.mate_in, side_to_move=board.turn, user_side=game.user_side)
+    variations = [{
+        "evaluation": normalize_evaluation(item.score_side_to_move, side_to_move=board.turn, user_side=game.user_side),
+        "mate_in": normalize_mate(item.mate_in, side_to_move=board.turn, user_side=game.user_side),
+        "principal_variation": japanese_variation(board, item.principal_variation),
+        "usi_principal_variation": item.principal_variation,
+    } for item in (result.variations or [result])[:5]]
+    return BranchAnalysis(
+        evaluation=evaluation, mate_in=mate_in, win_rate=win_rate(evaluation or 0, mate_in),
+        engine_name=engine.name, engine_version=engine.version,
+        evaluation_function=getattr(engine, "evaluation_name", None), variations=variations,
+    )
 
 
 @router.post("", response_model=Game, status_code=status.HTTP_202_ACCEPTED)
@@ -142,6 +229,7 @@ async def create_game(
     db: Annotated[Session, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
     is_public: Annotated[bool, Form()] = False,
+    professional_name_confirmed: Annotated[bool, Form()] = False,
     game_file: Annotated[UploadFile | None, File()] = None,
     game_text: Annotated[str | None, Form()] = None,
 ) -> GameModel:
@@ -178,6 +266,17 @@ async def create_game(
     except KifValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    professional_matches = matched_professional_names(parsed.sente_name, parsed.gote_name)
+    if professional_matches and not professional_name_confirmed:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "PROFESSIONAL_NAME_CONFIRMATION_REQUIRED",
+                "message": "プロ棋士の棋譜の可能性があります。本人対局で、プロ公式戦ではない場合のみ登録を続けられます。登録しますか？",
+                "matched_names": professional_matches,
+            },
+        )
+
     if is_professional_game(db, parsed.normalized_hash):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -207,6 +306,8 @@ async def create_game(
             played_at=played_at,
             user_side=user_side,
             is_public=is_public,
+            professional_name_suspected=bool(professional_matches),
+            professional_name_matches=professional_matches,
             initial_sfen=parsed.initial_sfen,
             usi_moves=parsed.usi_moves,
             move_count=len(parsed.usi_moves),
@@ -322,7 +423,7 @@ def game_playback(
     user: Annotated[User, Depends(get_current_user)],
 ) -> dict[str, object]:
     game = db.get(GameModel, game_id)
-    if game is None or game.user_id != user.id:
+    if game is None or not can_view_game(user, game):
         raise HTTPException(status_code=404, detail="棋譜が見つかりません。")
 
     submission = db.scalar(select(CommentSubmission).where(CommentSubmission.game_id == game_id))
@@ -340,7 +441,7 @@ def game_playback(
         for item in db.scalars(select(CriticalPositionModel).where(CriticalPositionModel.game_id == game_id))
     }
     comments: dict[int, list[dict[str, object]]] = {}
-    if submission is not None:
+    if submission is not None and (game.user_id == user.id or submitted):
         for answer in db.scalars(
             select(CommentAnswer)
             .where(CommentAnswer.submission_id == submission.id)
@@ -420,7 +521,7 @@ def get_branch_position(
     user: Annotated[User, Depends(get_current_user)],
 ) -> BranchPosition:
     game = db.get(GameModel, game_id)
-    if game is None or game.user_id != user.id:
+    if game is None or not can_view_game(user, game):
         raise HTTPException(status_code=404, detail="棋譜が見つかりません。")
     return branch_position(game, request)
 
@@ -433,13 +534,15 @@ def analyze_branch_position(
     user: Annotated[User, Depends(get_current_user)],
 ) -> BranchAnalysis:
     game = db.get(GameModel, game_id)
-    if game is None or game.user_id != user.id:
+    if game is None or not can_view_game(user, game):
         raise HTTPException(status_code=404, detail="棋譜が見つかりません。")
     submission = db.scalar(select(CommentSubmission).where(CommentSubmission.game_id == game_id))
     submitted = submission is not None and submission.submitted_at is not None
     test_user = bool(settings.ai_access_test_user_email) and user.email.lower() == settings.ai_access_test_user_email
     permanent_access = has_permanent_access(db, user.id)
-    if not has_ai_access(db, user.id) or not (submitted or test_user or permanent_access):
+    if not can_view_all_games(user) and (
+        not has_ai_access(db, user.id) or not (submitted or test_user or permanent_access)
+    ):
         raise HTTPException(status_code=403, detail="分岐解析はコメント提出後、AI解説プランで利用できます。")
     if request.move_number > game.move_count:
         raise HTTPException(status_code=422, detail="分岐開始局面が棋譜の手数を超えています。")
@@ -589,7 +692,7 @@ def list_critical_positions(
     user: Annotated[User, Depends(get_current_user)],
 ) -> list[CriticalPosition]:
     game = db.get(GameModel, game_id)
-    if game is None or game.user_id != user.id:
+    if game is None or not can_view_game(user, game):
         raise HTTPException(status_code=404, detail="棋譜が見つかりません。")
     submission = db.scalar(select(CommentSubmission).where(CommentSubmission.game_id == game_id))
     submitted = submission is not None and submission.submitted_at is not None

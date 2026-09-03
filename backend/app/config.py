@@ -50,6 +50,11 @@ class Settings:
     ai_access_monthly_price_yen = int(os.getenv("AI_ACCESS_MONTHLY_PRICE_YEN", "1000"))
     ai_access_trial_days = int(os.getenv("AI_ACCESS_TRIAL_DAYS", "30"))
     ai_access_test_user_email = os.getenv("AI_ACCESS_TEST_USER_EMAIL", "").lower()
+    global_game_viewer_email = os.getenv(
+        "GLOBAL_GAME_VIEWER_EMAIL", "naoki.xyz.ueda.xyz.5@gmail.com"
+    ).strip().lower()
+    android_apk_allowed_email = os.getenv("ANDROID_APK_ALLOWED_EMAIL", "").strip().lower()
+    android_apk_path = Path(os.getenv("ANDROID_APK_PATH", "/app/artifacts/kifu-comment-lab.apk"))
     weaviate_enabled = env_bool("WEAVIATE_ENABLED", True)
     weaviate_url = os.getenv("WEAVIATE_URL", "http://weaviate:8080").rstrip("/")
     weaviate_api_key = os.getenv("WEAVIATE_API_KEY", "")

@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 from typing import Annotated
 
 import pyotp
@@ -271,6 +272,19 @@ def issue_tokens(db: Session, user: User, *, admin_authenticated: bool = False) 
     )
 
 
+@router.post("/anonymous", response_model=TokenResponse, status_code=201)
+def anonymous_login(db: Annotated[Session, Depends(get_db)]) -> TokenResponse:
+    """個人情報を求めず、通常と同じ所有者制御が使える匿名セッションを作る。"""
+    user = User(
+        email=f"anonymous-{uuid4().hex}@anonymous.invalid",
+        password_hash=None,
+        email_verified=True,
+    )
+    db.add(user)
+    db.flush()
+    return issue_tokens(db, user)
+
+
 @router.post("/login", response_model=TokenResponse)
 def login(payload: LoginRequest, db: Annotated[Session, Depends(get_db)]) -> TokenResponse:
     user = db.scalar(select(User).where(User.email == payload.email.lower()))
@@ -336,11 +350,17 @@ def refresh(payload: RefreshRequest, db: Annotated[Session, Depends(get_db)]) ->
 
 @router.get("/me")
 def me(user: Annotated[User, Depends(get_current_user)]) -> dict[str, object]:
+    anonymous = user.email.endswith("@anonymous.invalid")
     return {
         "id": user.id,
-        "email": user.email,
+        "email": "匿名ユーザー" if anonymous else user.email,
         "is_admin": user.is_admin and getattr(user, "_admin_authenticated", False),
         "mfa_enabled": user.mfa_enabled,
+        "android_apk_download_allowed": bool(settings.android_apk_allowed_email)
+        and user.email.lower() == settings.android_apk_allowed_email,
+        "global_game_viewer": bool(settings.global_game_viewer_email)
+        and user.email.lower() == settings.global_game_viewer_email,
+        "is_anonymous": anonymous,
     }
 
 

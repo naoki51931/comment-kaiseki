@@ -74,6 +74,8 @@ services:
       AI_ACCESS_MONTHLY_PRICE_YEN: "1000"
       AI_ACCESS_TRIAL_DAYS: "30"
       AI_ACCESS_TEST_USER_EMAIL: ${AI_ACCESS_TEST_USER_EMAIL:-}
+      ANDROID_APK_ALLOWED_EMAIL: ${ANDROID_APK_ALLOWED_EMAIL:-naoki.xyz.ueda.xyz.5@gmail.com}
+      ANDROID_APK_PATH: /app/artifacts/kifu-comment-lab.apk
       WEAVIATE_ENABLED: "true"
       WEAVIATE_URL: http://weaviate:8080
       ENGINE_KIND: ${ENGINE_KIND:-development}
