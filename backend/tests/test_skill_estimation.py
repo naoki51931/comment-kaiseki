@@ -6,7 +6,7 @@ import pytest
 from app.services.analysis import normalize_evaluation
 from app.services.skill_estimation import (
     EvalLoss, build_summary, calculate_eval_loss, confidence_for_games,
-    estimate_rating, rating_to_rank,
+    estimate_rating, rating_to_rank, score_to_rating, smoothed_success_rate,
 )
 from app.services.training_recommendations import TrainingRecommendationService
 
@@ -78,10 +78,32 @@ def test_one_game_is_marked_reference() -> None:
     assert build_summary([analysis()], 10)["is_reference"] is True
 
 
+def test_no_winning_opportunity_is_neutral_instead_of_perfect() -> None:
+    assert smoothed_success_rate(0, 0) == 50
+
+
+def test_sparse_success_rate_is_smoothed() -> None:
+    assert smoothed_success_rate(1, 1) < 100
+    assert smoothed_success_rate(0, 1) > 0
+
+
+def test_summary_weights_games_by_analyzed_moves() -> None:
+    short = analysis(game_id=1, analyzed_move_count=5, average_eval_loss=300, best_move_match_rate=10)
+    long = analysis(game_id=2, analyzed_move_count=45, average_eval_loss=50, best_move_match_rate=70)
+    result = build_summary([short, long], 10)
+    assert result["average_eval_loss"] == 75
+    assert result["best_move_match_rate"] == 64
+
+
 def test_rating_increases_with_accuracy() -> None:
     weak, _ = estimate_rating(average_loss=300, best_rate=20, top3_rate=40, phase_scores=(40, 40, 40), conversion_rate=40, recovery_rate=0)
     strong, _ = estimate_rating(average_loss=30, best_rate=70, top3_rate=90, phase_scores=(85, 85, 85), conversion_rate=90, recovery_rate=40)
     assert strong > weak
+
+
+def test_middle_score_is_not_compressed_below_intermediate_ranks() -> None:
+    assert score_to_rating(44) == 1500
+    assert rating_to_rank(score_to_rating(44)) == "2級"
 
 
 @pytest.mark.parametrize(("rating", "rank"), [(650, "初心者"), (700, "10級"), (1600, "1級"), (1700, "初段"), (2200, "五段")])

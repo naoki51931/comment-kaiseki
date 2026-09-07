@@ -28,8 +28,8 @@ export default function SkillEstimationPage({apiFetch,gameId,onBack}:{apiFetch:A
   const [recommendations,setRecommendations]=useState<Recommendation[]>([]);const [detail,setDetail]=useState(false);
   const [loading,setLoading]=useState(true);const [error,setError]=useState("");
   useEffect(()=>{let active=true;(async()=>{setLoading(true);setError("");try{
-    const saved=await apiFetch("/api/skill-estimation/game/"+gameId);
-    const estimation=saved.status===404?await apiFetch("/api/skill-estimation/"+gameId,{method:"POST"}):saved;if(!estimation.ok){const raw=await estimation.text();let message=raw||"棋力推定に失敗しました。";try{const body=JSON.parse(raw);if(typeof body.detail==="string")message=body.detail}catch{}throw new Error(message);}
+    // 保存済みでも再計算し、判定基準の改善を過去の棋譜へ反映する。
+    const estimation=await apiFetch("/api/skill-estimation/"+gameId,{method:"POST"});if(!estimation.ok){const raw=await estimation.text();let message=raw||"棋力推定に失敗しました。";try{const body=JSON.parse(raw);if(typeof body.detail==="string")message=body.detail}catch{}throw new Error(message);}
     const [s,e,h,r]=await Promise.all([apiFetch(`/api/skill-estimation/summary?games=${windowSize}`),apiFetch(`/api/skill-estimation/endgame?games=${windowSize}`),apiFetch(`/api/skill-estimation/history?games=${windowSize}`),apiFetch(`/api/skill-estimation/recommendations?games=${windowSize}`)]);
     if(!s.ok||!e.ok||!h.ok||!r.ok)throw new Error("棋力診断を読み込めませんでした。");if(active){setSummary(await s.json());setEndgame(await e.json());setHistory(await h.json());setRecommendations((await r.json()).items)}
   }catch(reason){if(active)setError(reason instanceof Error?reason.message:"棋力推定に失敗しました。")}finally{if(active)setLoading(false)}})();return()=>{active=false}},[gameId,windowSize]);

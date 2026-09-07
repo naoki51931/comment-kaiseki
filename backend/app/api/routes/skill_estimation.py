@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.api.dependencies import get_current_user
 from app.database import get_db
 from app.models import AnalysisStatus, Game, GameSkillAnalysis, User
-from app.services.skill_estimation import analyze_game_skill, build_summary, rating_to_rank, validate_game_window
+from app.services.skill_estimation import analyze_game_skill, build_summary, rating_to_rank, score_to_rating, validate_game_window
 from app.services.training_recommendations import TrainingRecommendationService
 
 router = APIRouter()
@@ -114,7 +114,7 @@ def endgame(
     wins = summary_data["winning_positions"]
     return {
         "score": summary_data["endgame_score"],
-        "estimated_rank": rating_to_rank(500 + summary_data["endgame_score"] * 16),
+        "estimated_rank": rating_to_rank(score_to_rating(summary_data["endgame_score"])),
         "mate_detection_rate": round(summary_data["mate_found"] / opportunities * 100) if opportunities else None,
         "mate_opportunities": opportunities, "mate_found": summary_data["mate_found"],
         "mate_missed": summary_data["mate_missed"],

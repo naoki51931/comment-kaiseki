@@ -11,6 +11,7 @@ from app.models import AnalysisResult, Game, GameSkillAnalysis
 from app.services.skill_config import (
     BLUNDER_THRESHOLD, CONFIDENCE_LEVELS, ENDGAME_WEIGHTS, EVAL_LOSS_CAP,
     MAJOR_BLUNDER_THRESHOLD, OVERALL_WEIGHTS, PHASE_BOUNDARIES, RATING_RANKS,
+    RATING_BASE, RATING_POINTS_PER_SCORE, SITUATIONAL_PRIOR_OPPORTUNITIES,
     SUPPORTED_GAME_WINDOWS, WINNING_EVALUATION,
 )
 
@@ -66,6 +67,24 @@ def accuracy_score(losses: Iterable[int]) -> int:
     return round(max(0, 100 - mean(values) / 5)) if values else 0
 
 
+def smoothed_success_rate(successes: int, opportunities: int) -> float:
+    """少数・対象なしの局面を100%と誤認しない、50%事前分布付き成功率。"""
+    if opportunities < 0 or successes < 0 or successes > opportunities:
+        raise ValueError("成功数と対象局面数が不正です。")
+    prior = SITUATIONAL_PRIOR_OPPORTUNITIES
+    return (successes + prior * .5) / (opportunities + prior) * 100
+
+
+def _weighted_average(items: Iterable[GameSkillAnalysis], name: str) -> float:
+    values = list(items)
+    total_moves = sum(max(1, item.analyzed_move_count) for item in values)
+    return sum(getattr(item, name) * max(1, item.analyzed_move_count) for item in values) / total_moves
+
+
+def score_to_rating(score: float) -> int:
+    return round(RATING_BASE + max(0, min(100, score)) * RATING_POINTS_PER_SCORE)
+
+
 def estimate_rating(*, average_loss: float, best_rate: float, top3_rate: float,
                     phase_scores: Iterable[int], conversion_rate: float, recovery_rate: float) -> tuple[int, int]:
     eval_accuracy = max(0, 100 - average_loss / 5)
@@ -79,7 +98,7 @@ def estimate_rating(*, average_loss: float, best_rate: float, top3_rate: float,
         + recovery_rate * OVERALL_WEIGHTS["recovery"]
     )
     # 暫定ヒューリスティック。教師データによる較正へ差し替え可能。
-    return round(500 + overall * 16), round(overall)
+    return score_to_rating(overall), round(overall)
 
 
 def _is_user_move(move_number: int, user_side: str) -> bool:
@@ -155,9 +174,9 @@ def analyze_game_skill(db: Session, game: Game) -> GameSkillAnalysis:
     endgame_accuracy = accuracy_score(phase_losses["endgame"])
     best_rate = best_matches / count * 100
     top3_rate = top3_matches / count * 100
-    conversion_rate = winning_converted / winning_positions * 100 if winning_positions else 100
+    conversion_rate = smoothed_success_rate(winning_converted, winning_positions)
     recovery_rate = min(100, recoveries / count * 300)
-    mate_rate = mate_found / mate_opportunities * 100 if mate_opportunities else 100
+    mate_rate = smoothed_success_rate(mate_found, mate_opportunities)
     endgame_score = round(
         endgame_accuracy * ENDGAME_WEIGHTS["eval_accuracy"]
         + mate_rate * ENDGAME_WEIGHTS["mate_detection"]
@@ -198,13 +217,15 @@ def build_summary(analyses: list[GameSkillAnalysis], requested_games: int) -> di
     count = len(selected)
     if not selected:
         raise ValueError("棋力推定済みの棋譜がありません。")
-    avg = lambda name: round(mean(getattr(item, name) for item in selected))
-    average_loss = mean(item.average_eval_loss for item in selected)
+    # 短手数の一局と長手数の一局を同じ重さにせず、実際に解析した着手数で集計する。
+    avg = lambda name: round(_weighted_average(selected, name))
+    average_loss = _weighted_average(selected, "average_eval_loss")
+    winning_positions = sum(i.winning_positions for i in selected)
+    winning_converted = sum(i.winning_positions_converted for i in selected)
     rating, overall = estimate_rating(
         average_loss=average_loss, best_rate=avg("best_move_match_rate"), top3_rate=avg("top3_match_rate"),
         phase_scores=(avg("opening_score"), avg("middlegame_score"), avg("endgame_score")),
-        conversion_rate=(sum(i.winning_positions_converted for i in selected) / sum(i.winning_positions for i in selected) * 100)
-            if sum(i.winning_positions for i in selected) else 100,
+        conversion_rate=smoothed_success_rate(winning_converted, winning_positions),
         recovery_rate=min(100, sum(i.recovery_count for i in selected) / max(1, sum(i.analyzed_move_count for i in selected)) * 300),
     )
     confidence_label, confidence = confidence_for_games(count)
@@ -219,9 +240,10 @@ def build_summary(analyses: list[GameSkillAnalysis], requested_games: int) -> di
         "major_blunder_count": sum(i.major_blunder_count for i in selected),
         "mate_opportunities": sum(i.mate_opportunities for i in selected),
         "mate_found": sum(i.mate_found for i in selected), "mate_missed": sum(i.mate_missed for i in selected),
-        "winning_positions": sum(i.winning_positions for i in selected),
-        "winning_positions_converted": sum(i.winning_positions_converted for i in selected),
-        "overall_score": overall, "methodology": "本アプリ独自の暫定ヒューリスティック推定",
+        "winning_positions": winning_positions,
+        "winning_positions_converted": winning_converted,
+        "overall_score": overall,
+        "methodology": "解析着手数による加重集計と少数局面補正を用いた本アプリ独自の推定",
     }
 
 

@@ -37,4 +37,14 @@ ENDGAME_WEIGHTS = {
     "engine_match": 0.15,
 }
 
+# 成否を測れる局面が少ないとき、0%/100%へ振り切れないように使う事前局面数。
+# 事前平均は50%とし、実測局面が増えるほど影響が小さくなる。
+SITUATIONAL_PRIOR_OPPORTUNITIES = 4
+
+# 0〜100点の総合精度を段級位用レーティングへ換算する較正式。
+# 中級者帯の差が旧式（500 + 16点/score）では圧縮され過ぎていたため、
+# 下限を保ちつつ傾きを広げる。
+RATING_BASE = 400
+RATING_POINTS_PER_SCORE = 25
+
 SUPPORTED_GAME_WINDOWS = (10, 30, 100)
