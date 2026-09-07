@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, MouseEvent as ReactMouseEvent, useCallback, useEffect, useState } from "react";
 import { Capacitor } from "@capacitor/core";
 import SkillEstimationPage from "./SkillEstimationPage";
 
@@ -74,7 +74,7 @@ function LegacyPublicSearch(){
   }
   return <main className="public-search-page"><section className="card public-search-card"><div><span className="eyebrow">PUBLIC SEARCH</span><h2>公開棋譜・コメントを検索</h2><p>投稿者が公開に設定した棋譜、重要局面、提出済みの匿名コメントを検索できます。</p></div><form onSubmit={search}><label htmlFor="public-search">キーワード</label><div className="search-input-row"><input id="public-search" type="search" value={query} onChange={event=>setQuery(event.target.value)} placeholder="例：終盤、詰み、飛車を切る" maxLength={200}/><button disabled={busy||!query.trim()}>{busy?"検索中…":"公開データを検索"}</button></div></form>{error&&<p className="alert" role="alert">{error}</p>}{searched&&results.length===0&&<p className="empty">一致する公開データはありません。</p>}{results.length>0&&<div className="search-results" aria-live="polite">{results.map(result=><article className="public-search-result" key={result.source_type+"-"+result.source_id}><strong>{result.title}</strong><span>{result.event_name??"棋戦名不明"}{result.move_number!==null?"・"+result.move_number+"手目":""}</span><p>{result.text||"公開情報はありません。"}</p><small>{result.source_type==="game"?"公開棋譜":result.source_type==="critical_position"?"重要局面":"匿名コメント"}</small></article>)}</div>}</section></main>;
 }
-function PublicSearch(){
+function PublicSearch({loggedIn,globalGameViewer,onNavigate}:{loggedIn:boolean;globalGameViewer:boolean;onNavigate:(path:string)=>void}){
   const [query,setQuery]=useState("");
   const [tesu,setTesu]=useState("");
   const [results,setResults]=useState<SearchResult[]>([]);
@@ -90,7 +90,7 @@ function PublicSearch(){
     }catch{setError("公開データを検索できませんでした。")}finally{setBusy(false)}
   }
   return <main className="public-search-page"><section className="card public-search-card">
-    <div><span className="eyebrow">PUBLIC SEARCH</span><h2>公開棋譜・コメントを検索</h2><p>検索結果を選ぶと、公開棋譜の盤面と分岐盤を確認できます。</p></div>
+    <div><span className="eyebrow">PUBLIC SEARCH</span><h2>公開棋譜・コメントを検索</h2><p>検索結果を選ぶと、公開棋譜の盤面と分岐盤を確認できます。</p>{!loggedIn&&<button type="button" className="public-search-login" onClick={()=>onNavigate("/login")}>ログインして棋譜を確認する</button>}{loggedIn&&<button type="button" className="public-search-login" onClick={()=>onNavigate("/dashboard")}>{globalGameViewer?"全ユーザーの棋譜を確認する":"自分の棋譜を確認する"}</button>}</div>
     <form onSubmit={search}><div className="form-row"><label htmlFor="public-search">キーワード<input id="public-search" type="search" value={query} onChange={event=>setQuery(event.target.value)} placeholder="例：終盤、詰み、飛車を切る" maxLength={200}/></label><label htmlFor="public-search-tesu">表示手数<input id="public-search-tesu" type="number" min="0" max="1000" value={tesu} onChange={event=>setTesu(event.target.value)} placeholder="例：30"/></label></div><button disabled={busy||!query.trim()&&!tesu}>{busy?"検索中…":"公開データを検索"}</button></form>
     {error&&<p className="alert" role="alert">{error}</p>}
     {searched&&results.length===0&&<p className="empty">一致する公開データはありません。</p>}
@@ -197,26 +197,48 @@ function BranchEditor({gameId,baseMoveNumber,apiFetch,onError,apiPrefix="/api/ga
 }
 
 
-function ReadonlyBoard({board,label}:{board:PlaybackFrame["board"];label:string}){
+function LegacyReadonlyBoard({board,label}:{board:PlaybackFrame["board"];label:string}){
   return <div className="admin-board"><div className="piece-stand"><span>後手の持ち駒</span><strong>{board.hands.GOTE.length?board.hands.GOTE.map(item=>item.symbol+(item.count>1?item.count:"")).join(" "):"なし"}</strong></div><div className="board-coordinate-grid"><div className="board-files">{[9,8,7,6,5,4,3,2,1].map(file=><span key={file}>{file}</span>)}</div><div className="shogi-board" aria-label={label}>{board.squares.flatMap((row,rank)=>row.map((piece,file)=><div className="board-square" key={rank+"-"+file}>{piece&&<span className={piece.owner==="GOTE"?"gote-piece":""}>{piece.symbol}</span>}</div>))}</div><div className="board-ranks">{[1,2,3,4,5,6,7,8,9].map(rank=><span key={rank}>{rank}</span>)}</div></div><div className="piece-stand"><span>先手の持ち駒</span><strong>{board.hands.SENTE.length?board.hands.SENTE.map(item=>item.symbol+(item.count>1?item.count:"")).join(" "):"なし"}</strong></div></div>;
 }
 
-function PublicGamePage({gameId,onBack,pathTesu}:{gameId:number;onBack:()=>void;pathTesu?:number}){
+function ReadonlyBoard({board,label,onStep}:{board:PlaybackFrame["board"];label:string;onStep?:(direction:-1|1)=>void}){
+  function boardClick(event:ReactMouseEvent<HTMLDivElement>){
+    if(!onStep)return;
+    const rect=event.currentTarget.getBoundingClientRect();
+    onStep(event.clientX<rect.left+rect.width/2?-1:1);
+  }
+  return <div className="admin-board"><div className="piece-stand"><span>後手の持ち駒</span><strong>{board.hands.GOTE.length?board.hands.GOTE.map(item=>item.symbol+(item.count>1?item.count:"")).join(" "):"なし"}</strong></div><div className="board-coordinate-grid"><div className="board-files">{[9,8,7,6,5,4,3,2,1].map(file=><span key={file}>{file}</span>)}</div><div className="shogi-board step-board" aria-label={`${label}。左半分で前へ、右半分で次へ`} onClick={boardClick}>{board.squares.flatMap((row,rank)=>row.map((piece,file)=><div className="board-square" key={rank+"-"+file}>{piece&&<span className={piece.owner==="GOTE"?"gote-piece":""}>{piece.symbol}</span>}</div>))}</div><div className="board-ranks">{[1,2,3,4,5,6,7,8,9].map(rank=><span key={rank}>{rank}</span>)}</div></div><div className="piece-stand"><span>先手の持ち駒</span><strong>{board.hands.SENTE.length?board.hands.SENTE.map(item=>item.symbol+(item.count>1?item.count:"")).join(" "):"なし"}</strong></div></div>;
+}
+
+function PublicGamePage({gameId,onBack,pathTesu,loggedIn,apiFetch}:{gameId:number;onBack:()=>void;pathTesu?:number;loggedIn:boolean;apiFetch:(path:string,init?:RequestInit)=>Promise<Response>}){
   const requestedTesu=Math.max(0,(pathTesu??Number(new URLSearchParams(location.search).get("tesu")??0))||0);
   const [playback,setPlayback]=useState<Playback|null>(null),[index,setIndex]=useState(requestedTesu),[error,setError]=useState("");
-  useEffect(()=>{void (async()=>{try{const response=await fetch(`/api/games/public/${gameId}/playback`);if(!response.ok)throw new Error();const body:Playback=await response.json();setPlayback(body);setIndex(Math.min(requestedTesu,body.frames.length-1))}catch{setError("公開棋譜を読み込めませんでした。")}})()},[gameId]);
+  const [includeMoveNumber,setIncludeMoveNumber]=useState(false),[copyFeedback,setCopyFeedback]=useState("");
+  useEffect(()=>{void (async()=>{try{const response=loggedIn?await apiFetch(`/api/games/${gameId}/playback`):await fetch(`/api/games/public/${gameId}/playback`);if(!response.ok)throw new Error();const body:Playback=await response.json();setPlayback(body);setIndex(Math.min(requestedTesu,body.frames.length-1))}catch{setError("公開棋譜を読み込めませんでした。")}})()},[gameId,loggedIn]);
   const frame=playback?.frames[index]??null;
+  const currentMoveNumber=frame?.move_number??index;
+  const evaluationAvailable=Boolean(playback?.frames.some(item=>item.evaluation!==null));
+  async function copyLink(){
+    const url=new URL(`/public/games/${gameId}`,window.location.origin);
+    if(includeMoveNumber)url.searchParams.set("tesu",String(currentMoveNumber));
+    try{await navigator.clipboard.writeText(url.toString());setCopyFeedback(includeMoveNumber?`${currentMoveNumber}手目を含むリンクをコピーしました。`:"リンクをコピーしました。")}catch{setCopyFeedback("リンクをコピーできませんでした。");}
+  }
   return <main className="public-search-page"><section className="card public-search-card">
     <button type="button" className="back-button" onClick={onBack}>← トップページへ</button>
     <span className="eyebrow">PUBLIC GAME</span><h2>{playback?.filename??"公開棋譜"}</h2>
     {error&&<p className="alert" role="alert">{error}</p>}
     {!playback&&!error&&<p>棋譜を読み込んでいます…</p>}
     {playback&&frame&&<><p>{playback.event_name??"棋戦名不明"}<br/>先手 {playback.sente_name??"不明"} ／ 後手 {playback.gote_name??"不明"}</p>
-      <ReadonlyBoard board={frame.board} label={`${frame.move_number}手目の公開棋譜盤面`}/>
+      <ReadonlyBoard board={frame.board} label={`${frame.move_number}手目の公開棋譜盤面`} onStep={direction=>setIndex(current=>Math.max(0,Math.min(playback.frames.length-1,current+direction)))}/>
       <h3>{frame.move_number}手目・{frame.japanese_move}</h3>
+      {loggedIn&&evaluationAvailable&&(
+        <EvaluationChart frames={playback.frames} currentIndex={index} userSide={playback.user_side} onSelect={setIndex}/>
+      )}
+      {loggedIn?<div className="public-game-analysis"><h3>評価値・解析情報</h3>{frame.evaluation!==null?<p className="evaluation-value">{frame.evaluation}<small>{frame.win_rate!==null?` 勝率 ${frame.win_rate}%`:""}</small></p>:<p className="empty">この局面の評価値はありません。</p>}{frame.engine_name&&<p className="engine-identity"><strong>{frame.engine_name==="YaneuraOu"?"やねうら王":frame.engine_name}</strong>{frame.engine_version&&<>・{frame.engine_version}</>}{frame.evaluation_function&&<>／評価関数 {frame.evaluation_function==="Suisho5"?"水匠5":frame.evaluation_function}</>}</p>}{frame.selection_reason&&<p>{frame.selection_reason}</p>}{frame.variations?.length?<div className="engine-variations"><h4>読み筋・候補手</h4>{frame.variations.map((variation,variationIndex)=><article key={variationIndex}><strong>候補 {variationIndex+1}・評価 {variation.mate_in!==null?`詰み ${variation.mate_in}`:variation.evaluation??"–"}</strong><p>{variation.principal_variation.join(" → ")||"読み筋なし"}</p></article>)}</div>:playback.ai_visible&&<p className="empty">この局面の読み筋はありません。</p>}{!playback.ai_visible&&<p className="input-help">詳しい読み筋はAI解説プランで確認できます。</p>}</div>:<p className="input-help">評価値などの解析情報は、ログインすると確認できます。</p>}
       <div className="playback-controls"><button onClick={()=>setIndex(0)} disabled={index===0}>最初</button><button onClick={()=>setIndex(Math.max(0,index-1))} disabled={index===0}>前へ</button><button onClick={()=>setIndex(Math.min(playback.frames.length-1,index+1))} disabled={index===playback.frames.length-1}>次へ</button><button onClick={()=>setIndex(playback.frames.length-1)} disabled={index===playback.frames.length-1}>最後</button></div>
       <input className="move-slider" type="range" min="0" max={playback.frames.length-1} value={index} onChange={event=>setIndex(Number(event.target.value))} aria-label="公開棋譜の再生手数"/>
-      <BranchEditor gameId={gameId} baseMoveNumber={frame.move_number} apiFetch={(path,init)=>fetch(path,init)} apiPrefix="/api/games/public" onError={setError}/>
+      <div className="public-link-copy"><label className="check"><input type="checkbox" checked={includeMoveNumber} onChange={event=>setIncludeMoveNumber(event.target.checked)}/>現在の手数（{currentMoveNumber}手目）を含める</label><button type="button" onClick={()=>void copyLink()}>リンクをコピーする</button>{copyFeedback&&<p className="input-help" role="status">{copyFeedback}</p>}</div>
+      <BranchEditor gameId={gameId} baseMoveNumber={frame.move_number} apiFetch={loggedIn?apiFetch:(path,init)=>fetch(path,init)} apiPrefix={loggedIn?"/api/games":"/api/games/public"} onError={setError}/>
     </>}
   </section></main>;
 }
@@ -610,10 +632,22 @@ export default function App(){
   useEffect(()=>{if(!accessToken||routedGameId===null||pathParts[3]==="skill-estimation"||!games.length)return;const game=games.find(item=>item.id===routedGameId);if(game&&selectedGame?.id!==game.id)void openGame(game)},[accessToken,games,path]);
   useEffect(()=>{if(pathParts[3]!=="skill-estimation")return;setSkillEstimationGameId(routedGameId)},[path]);
   useEffect(()=>{setVariationIndex(0);setVisibleVariationMoves(5)},[playbackIndex,playback?.game_id]);
-  if(path==="/")return <><ShogiHomeButton onActivate={()=>window.scrollTo({top:0,behavior:"smooth"})}/><HeroShogiPieces/><TopPage loggedIn={Boolean(accessToken)} onNavigate={navigate} onGoogleLogin={googleLogin} onAnonymousAnalyze={anonymousAnalyze} busy={busy} error={uploadError}/><TopPostingTerms/><PublicSearch/></>;
+  useEffect(()=>{
+    function stepFromBoard(event:MouseEvent){
+      if(!(event.target instanceof Element))return;
+      const board=event.target.closest<HTMLElement>(".main-board-area-inner .shogi-board");
+      if(!board||!playback)return;
+      const rect=board.getBoundingClientRect();
+      const direction=event.clientX<rect.left+rect.width/2?-1:1;
+      setPlaybackIndex(current=>Math.max(0,Math.min(playback.frames.length-1,current+direction)));
+    }
+    document.addEventListener("click",stepFromBoard);
+    return()=>document.removeEventListener("click",stepFromBoard);
+  },[playback]);
+  if(path==="/")return <><ShogiHomeButton onActivate={()=>window.scrollTo({top:0,behavior:"smooth"})}/><HeroShogiPieces/><TopPage loggedIn={Boolean(accessToken)} onNavigate={navigate} onGoogleLogin={googleLogin} onAnonymousAnalyze={anonymousAnalyze} busy={busy} error={uploadError}/><TopPostingTerms/><PublicSearch loggedIn={Boolean(accessToken)} globalGameViewer={Boolean(user?.global_game_viewer)} onNavigate={navigate}/></>;
   if(path==="/service")return <ServicePage loggedIn={Boolean(accessToken)} onNavigate={navigate}/>;
   const publicGameMatch=path.match(/^\/public\/games\/(\d+)(?:&tesu=(\d+))?$/);
-  if(publicGameMatch)return <PublicGamePage gameId={Number(publicGameMatch[1])} pathTesu={publicGameMatch[2]?Number(publicGameMatch[2]):undefined} onBack={()=>navigate("/")}/>;
+  if(publicGameMatch)return <PublicGamePage gameId={Number(publicGameMatch[1])} pathTesu={publicGameMatch[2]?Number(publicGameMatch[2]):undefined} loggedIn={Boolean(accessToken)} apiFetch={apiFetch} onBack={()=>navigate("/")}/>;
   if(path==="/reset-password")return <main className="auth-page"><button type="button" className="back-button" onClick={()=>navigate("/login")}>← ログインへ戻る</button><section className="card reset-password-card"><h1>パスワード再設定</h1>{error&&<p className="alert">{error}</p>}<p>新しいパスワードを入力してください。</p><form onSubmit={resetPassword}><PasswordField id="reset-password" label="新しいパスワード（12文字以上）" autoComplete="new-password" minLength={12}/><PasswordField id="reset-password-confirmation" name="password_confirmation" label="新しいパスワード（確認）" autoComplete="new-password" minLength={12}/><button type="submit">パスワードを変更する</button></form></section></main>;
   if(!accessToken)return <main className="auth-page"><button type="button" className="back-button" onClick={()=>navigate("/")}>← トップページへ</button><h1>棋譜コメント研究所</h1>{error&&<p className="alert">{error}</p>}{notice&&<p className="notice">{notice}</p>}<div className="auth-grid">
     <section className="card"><h2>ログイン</h2><form onSubmit={login}><label>メール<input name="email" type="email" autoComplete="email" required/></label><PasswordField id="login-password" label="パスワード" autoComplete="current-password"/><label>MFAコード（管理者としてログインする場合）<input name="mfa_code" inputMode="numeric" pattern="[0-9]{6}" maxLength={6}/></label><small className="input-help">未入力の場合は、管理者アカウントでも一般ユーザーとしてログインします。</small><button>ログイン</button></form><div className="auth-divider"><span>または</span></div><GoogleLoginButton onCredential={googleLogin}/><hr/><h3>パスワードを忘れた方</h3><form onSubmit={requestPasswordReset}><label>登録メール<input name="email" type="email" autoComplete="email" required/></label><button type="submit" className="link-button">再設定メールを送る</button></form></section>

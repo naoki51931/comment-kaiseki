@@ -46,7 +46,7 @@
 通常の開発・検証・公開反映では、報酬額0円版のComposeファイルをデフォルトで使用する。
 
 ```bash
-sudo docker compose -f docker-compose-0yen-ver.yml up -d --build
+sudo docker compose -f docker-compose.yml -f docker-compose-0yen-ver.yml up -d --build
 ```
 
 `docker-compose.yml` を使用するのは、報酬ありの通常版を明示的に起動する必要がある場合に限る。
@@ -69,4 +69,3 @@ cd frontend && npm run build
 - 重複検知をファイル名や対局者名だけで行わない。
 - 報酬状態を履歴なしで上書きしない。
 - 法務・税務・決済事業者の確認事項を、実装上の推測だけで確定扱いしない。
-

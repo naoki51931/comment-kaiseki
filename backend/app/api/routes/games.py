@@ -42,7 +42,7 @@ def can_view_all_games(user: User) -> bool:
 
 
 def can_view_game(user: User, game: GameModel) -> bool:
-    return game.user_id == user.id or can_view_all_games(user)
+    return game.user_id == user.id or game.is_public or can_view_all_games(user)
 
 
 def game_view(game: GameModel, owner_email: str | None = None) -> Game:
@@ -430,8 +430,8 @@ def game_playback(
     submitted = submission is not None and submission.submitted_at is not None
     test_user = bool(settings.ai_access_test_user_email) and user.email.lower() == settings.ai_access_test_user_email
     permanent_access = has_permanent_access(db, user.id)
-    evaluation_visible = submitted or test_user or permanent_access
-    ai_visible = has_ai_access(db, user.id) and (submitted or test_user or permanent_access)
+    evaluation_visible = game.is_public or submitted or test_user or permanent_access
+    ai_visible = has_ai_access(db, user.id) and (game.is_public or submitted or test_user or permanent_access)
     analyses = {
         item.move_number: item
         for item in db.scalars(select(AnalysisResult).where(AnalysisResult.game_id == game_id))

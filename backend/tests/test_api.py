@@ -186,6 +186,34 @@ def test_upload_can_be_registered_as_public(client: TestClient) -> None:
     assert analysis.status_code == 200
 
 
+def test_logged_in_user_can_open_another_users_public_playback(client: TestClient) -> None:
+    response = client.post(
+        "/api/games",
+        data={
+            "played_at": "2026-07-13",
+            "user_side": "SENTE",
+            "is_public": "true",
+            "ownership_confirmed": "true",
+            "posting_terms_agreed": "true",
+            "game_text": KIF,
+        },
+    )
+    game_id = response.json()["id"]
+    sessions = client.app.state.testing_session
+    with sessions() as db:
+        viewer = User(email="viewer@example.test", email_verified=True)
+        db.add(viewer)
+        db.commit()
+        db.refresh(viewer)
+        db.expunge(viewer)
+
+    app.dependency_overrides[get_current_user] = lambda: viewer
+
+    playback = client.get(f"/api/games/{game_id}/playback")
+    assert playback.status_code == 200
+    assert playback.json()["frames"][1]["japanese_move"] == "７六歩(77)"
+
+
 def test_owner_can_edit_game_visibility(client: TestClient) -> None:
     game_id = upload(client).json()["id"]
 
